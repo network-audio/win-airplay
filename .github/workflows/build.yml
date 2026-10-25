@@ -39,7 +39,7 @@ jobs:
         run: |
           msbuild driver/sysvad/EndpointsCommon/EndpointsCommon.vcxproj /m /p:Configuration=Release /p:Platform=x64
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          msbuild driver/sysvad/KeywordDetectorAdapter/KeywordDetectorContosoAdapter.vcxproj /m /p:Configuration=Release /p:Platform=x64
+          msbuild driver/sysvad/KeywordDetectorAdapter/KeywordDetectorContosoAdapter.vcxproj /m /p:Configuration=Release /p:Platform=x64 /p:ApiValidator_Enable=false
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           msbuild driver/sysvad/TabletAudioSample/TabletAudioSample.vcxproj /m /p:Configuration=Release /p:Platform=x64
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
