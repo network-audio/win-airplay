@@ -40,6 +40,7 @@ jobs:
           $stampInf = Get-ChildItem .\packages -Filter stampinf.exe -Recurse | Where-Object { $_.FullName -match '\\x64\\' } | Select-Object -First 1
           if (-not $stampInf) { throw 'stampinf.exe was not found in the restored WDK packages' }
           Write-Host "Using stampinf.exe from $($stampInf.DirectoryName)"
+          $env:PATH = "$($stampInf.DirectoryName);$env:PATH"
           msbuild driver/sysvad/EndpointsCommon/EndpointsCommon.vcxproj /m /p:Configuration=Release /p:Platform=x64
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           msbuild driver/sysvad/KeywordDetectorAdapter/KeywordDetectorContosoAdapter.vcxproj /m /p:Configuration=Release /p:Platform=x64 /p:ApiValidator_Enable=false
