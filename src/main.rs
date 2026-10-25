@@ -94,7 +94,18 @@ fn discover(seconds: u64) -> Result<Vec<Speaker>, String> {
         }
     }
     let _ = mdns.shutdown();
-    Ok(found.into_values().collect())
+    let speakers: Vec<_> = found.into_values().collect();
+    let airplay_addresses: std::collections::BTreeSet<_> = speakers
+        .iter()
+        .filter(|speaker| speaker.service == SERVICE_TYPES[0])
+        .map(|speaker| speaker.address)
+        .collect();
+    Ok(speakers
+        .into_iter()
+        .filter(|speaker| {
+            speaker.service == SERVICE_TYPES[0] || !airplay_addresses.contains(&speaker.address)
+        })
+        .collect())
 }
 
 fn sender_args(
