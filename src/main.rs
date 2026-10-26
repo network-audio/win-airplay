@@ -587,27 +587,72 @@ fn run_usbip_manager() -> Result<(), String> {
     let server =
         usbip_audio::Server::start(3240).map_err(|error| format!("USB/IP server: {error}"))?;
     let (discovery_tx, discovery_rx) = mpsc::channel();
-    std::thread::spawn(move || loop {
-        match discover(4) {
-            Ok(speakers) => {
-                let reachable = speakers
-                    .into_iter()
+    std::thread::spawn(move || {
+        // Keep one mDNS browser alive so a speaker remains known between
+        // announcements. Recreating a browser for every scan produced empty
+        // snapshots and detached every Windows output at once.
+        let mdns = match ServiceDaemon::new() {
+            Ok(mdns) => mdns,
+            Err(error) => {
+                eprintln!("AirPlay discovery failed: {error}");
+                return;
+            }
+        };
+        let browser = match mdns.browse(SERVICE_TYPES[0]) {
+            Ok(browser) => browser,
+            Err(error) => {
+                eprintln!("AirPlay browse failed: {error}");
+                return;
+            }
+        };
+        let mut known: BTreeMap<String, Vec<Speaker>> = BTreeMap::new();
+        let mut next_report = Instant::now();
+        loop {
+            match browser.recv_timeout(Duration::from_millis(100)) {
+                Ok(ServiceEvent::ServiceResolved(info)) => {
+                    let fullname = info.get_fullname().to_owned();
+                    let name = instance_name(&fullname, SERVICE_TYPES[0]);
+                    let speakers = info
+                        .get_addresses()
+                        .iter()
+                        .copied()
+                        .filter(|address| address.is_ipv4())
+                        .map(|address| Speaker {
+                            name: name.clone(),
+                            address,
+                            port: info.get_port(),
+                            service: SERVICE_TYPES[0].to_owned(),
+                            model: info.get_property_val_str("model").map(str::to_owned),
+                            device_id: info.get_property_val_str("deviceid").map(str::to_owned),
+                        })
+                        .collect();
+                    known.insert(fullname, speakers);
+                }
+                Ok(ServiceEvent::ServiceRemoved(_, fullname)) => {
+                    known.remove(&fullname);
+                }
+                _ => {}
+            }
+            if Instant::now() >= next_report {
+                let reachable = known
+                    .values()
+                    .flatten()
                     .filter(|speaker| {
-                        speaker.service == SERVICE_TYPES[0]
-                            && std::net::TcpStream::connect_timeout(
-                                &SocketAddr::new(speaker.address, speaker.port),
-                                Duration::from_millis(400),
-                            )
-                            .is_ok()
+                        std::net::TcpStream::connect_timeout(
+                            &SocketAddr::new(speaker.address, speaker.port),
+                            Duration::from_millis(400),
+                        )
+                        .is_ok()
                     })
-                    .collect::<Vec<_>>();
+                    .cloned()
+                    .collect();
                 if discovery_tx.send(reachable).is_err() {
                     break;
                 }
+                next_report = Instant::now() + Duration::from_secs(5);
             }
-            Err(error) => eprintln!("AirPlay discovery failed: {error}"),
         }
-        std::thread::sleep(Duration::from_secs(1));
+        let _ = mdns.shutdown();
     });
     let mut active: BTreeMap<String, Managed> = BTreeMap::new();
     loop {

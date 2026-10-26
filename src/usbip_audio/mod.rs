@@ -444,9 +444,14 @@ fn handle_submit(
             Err(status) => (status, Vec::new(), 0, Vec::new()),
         };
     }
-    if ep != 1 || direction != 0 || iso.is_empty() || device.state.lock().unwrap().alternate != 1 {
+    // usbip-win2 forwards audio URBs even when it handles SET_INTERFACE
+    // locally rather than forwarding that control request to this server.
+    // A valid transfer on endpoint 1 is sufficient evidence that Windows
+    // selected the streaming alternate setting.
+    if ep != 1 || direction != 0 || iso.is_empty() {
         return (EPIPE, Vec::new(), 0, Vec::new());
     }
+    device.state.lock().unwrap().alternate = 1;
     let mut reply = iso.to_vec();
     let mut compact = Vec::with_capacity(payload.len());
     let mut actual = 0usize;
@@ -742,6 +747,32 @@ mod tests {
         assert_eq!(
             streams.pcm.pop_timeout(Duration::from_secs(2)).unwrap(),
             short_pcm
+        );
+
+        // usbip-win2 may handle SET_INTERFACE itself. Audio URBs must still
+        // reach the PCM queue when the server last observed alternate 0.
+        client
+            .write_all(&submit(
+                7,
+                0,
+                0,
+                [1, 11, 0, 0, 1, 0, 0, 0],
+                &[],
+                u32::MAX,
+                &[],
+            ))
+            .unwrap();
+        client.read_exact(&mut reply).unwrap();
+        assert_eq!(be32(&reply[20..24]), 0);
+        client
+            .write_all(&submit(8, 0, 1, [0; 8], &pcm, 2, &iso))
+            .unwrap();
+        client.read_exact(&mut reply).unwrap();
+        assert_eq!(be32(&reply[20..24]), 0);
+        client.read_exact(&mut iso_reply).unwrap();
+        assert_eq!(
+            streams.pcm.pop_timeout(Duration::from_secs(2)).unwrap(),
+            pcm
         );
     }
 
