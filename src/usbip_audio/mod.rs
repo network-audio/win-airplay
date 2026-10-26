@@ -346,6 +346,14 @@ fn read_exact_active(
     Ok(())
 }
 
+fn next_iso_deadline(previous: Instant, now: Instant, packets: u32) -> Instant {
+    // Preserve the USB audio clock across URBs. Restarting each 10 ms period
+    // from `now` also adds processing time to every period, starving AirPlay.
+    // Limit catch-up to 20 ms after an unusually long scheduling pause.
+    let oldest = now.checked_sub(Duration::from_millis(20)).unwrap_or(now);
+    previous.max(oldest) + Duration::from_millis(u64::from(packets.min(100)))
+}
+
 fn serve_imported(stream: &mut TcpStream, device: &Device, stop: &AtomicBool) -> io::Result<()> {
     let mut next_audio_due = std::time::Instant::now();
     loop {
@@ -413,8 +421,7 @@ fn serve_imported(stream: &mut TcpStream, device: &Device, stop: &AtomicBool) ->
                 out.extend_from_slice(&iso_reply);
                 if ep == 1 && direction == 0 && packets > 0 && packets != u32::MAX {
                     let now = std::time::Instant::now();
-                    next_audio_due = next_audio_due.max(now)
-                        + Duration::from_millis(u64::from(packets.min(100)));
+                    next_audio_due = next_iso_deadline(next_audio_due, now, packets);
                     thread::sleep(next_audio_due.saturating_duration_since(now));
                 }
                 stream.write_all(&out)?;
@@ -614,6 +621,20 @@ fn string_descriptor(device: &Device, index: u8) -> Result<Vec<u8>, i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iso_deadline_does_not_accumulate_processing_time() {
+        let start = Instant::now();
+        let mut due = start;
+        for _ in 0..1_000 {
+            let now = due + Duration::from_micros(500);
+            due = next_iso_deadline(due, now, 10);
+        }
+        assert_eq!(due.duration_since(start), Duration::from_secs(10));
+        let late = due + Duration::from_secs(1);
+        let resumed = next_iso_deadline(due, late, 10);
+        assert!(resumed <= late + Duration::from_millis(10));
+    }
 
     #[test]
     fn idle_silence_does_not_trigger_a_stream() {
