@@ -245,13 +245,14 @@ fn run(cli: Cli) -> Result<(), String> {
                 while Instant::now() < deadline {
                     for (index, source) in [Some(&streams), second.as_ref()].into_iter().enumerate()
                     {
-                        if let Some(packet) = source
-                            .and_then(|stream| stream.pcm.pop_timeout(Duration::from_millis(100)))
-                        {
-                            received[index] += packet.len();
-                            nonzero[index] += packet.iter().filter(|&&byte| byte != 0).count();
+                        if let Some(stream) = source {
+                            while let Some(packet) = stream.pcm.pop_timeout(Duration::ZERO) {
+                                received[index] += packet.len();
+                                nonzero[index] += packet.iter().filter(|&&byte| byte != 0).count();
+                            }
                         }
                     }
+                    std::thread::sleep(Duration::from_millis(5));
                 }
                 for index in 0..if two_speakers { 2 } else { 1 } {
                     if nonzero[index] == 0 {
