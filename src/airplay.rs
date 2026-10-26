@@ -4,6 +4,7 @@ use pipeline::{PipelineMetricsTracker, DEFAULT_RING_BUFFER_PACKETS};
 use raop::ap2::session::{Ap2Config, Ap2Session};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -287,19 +288,28 @@ async fn run_session(
 ) -> Result<(), String> {
     let config = Ap2Config {
         target,
-        latency_frames: -4410,
+        // Give receivers their native buffering window. The previous -100 ms
+        // setting left little room for Windows USB capture and Wi-Fi jitter.
+        latency_frames: 0,
         volume_db: volume.receiver_db(),
         quiet_mode: false,
         ..Default::default()
     };
     let metrics = Arc::new(PipelineMetricsTracker::new(DEFAULT_RING_BUFFER_PACKETS));
     let mut session =
-        Ap2Session::start_with_source(config, source, metrics, DEFAULT_RING_BUFFER_PACKETS)
+        Ap2Session::start_with_source(config, source, metrics.clone(), DEFAULT_RING_BUFFER_PACKETS)
             .await
             .map_err(|error| error.to_string())?;
+    let stats = session.stats();
+    eprintln!(
+        "AirPlay session started: target={target} volume_db={:.1}",
+        volume.receiver_db()
+    );
     let mut remote_commands = session.take_remote_commands();
     let mut feedback = tokio::time::interval(Duration::from_secs(2));
     feedback.tick().await;
+    let mut report = tokio::time::interval(Duration::from_secs(10));
+    report.tick().await;
     let deadline = duration.map(|duration| tokio::time::Instant::now() + duration);
     loop {
         tokio::select! {
@@ -331,6 +341,14 @@ async fn run_session(
                     break;
                 }
             },
+            _ = report.tick() => {
+                let m = metrics.snapshot();
+                eprintln!("AirPlay audio target={target} sent={} send_errors={} dropped={} gaps={} buffer={}/{} retransmits={}",
+                    m.packets_sent, stats.audio_send_errors.load(Ordering::Relaxed),
+                    m.packets_dropped, m.capture_discontinuities,
+                    m.buffer_fill_packets, m.buffer_capacity_packets,
+                    stats.retransmit_requests.load(Ordering::Relaxed));
+            },
             _ = async {
                 if let Some(deadline) = deadline {
                     tokio::time::sleep_until(deadline).await;
@@ -340,6 +358,11 @@ async fn run_session(
             } => break,
         }
     }
+    let m = metrics.snapshot();
+    eprintln!("AirPlay session ending: target={target} sent={} send_errors={} dropped={} gaps={} retransmits={}",
+        m.packets_sent, stats.audio_send_errors.load(Ordering::Relaxed),
+        m.packets_dropped, m.capture_discontinuities,
+        stats.retransmit_requests.load(Ordering::Relaxed));
     session.stop().await;
     Ok(())
 }
