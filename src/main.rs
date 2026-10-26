@@ -60,6 +60,8 @@ enum Action {
         seconds: u64,
         #[arg(long)]
         expect_pcm: bool,
+        #[arg(long)]
+        two_speakers: bool,
     },
     /// Send a WASAPI test tone directly to a named output without selecting it.
     #[command(hide = true)]
@@ -222,32 +224,57 @@ fn run(cli: Cli) -> Result<(), String> {
         Action::UsbipProbe {
             seconds,
             expect_pcm,
+            two_speakers,
         } => {
             let server = usbip_audio::Server::start(3240).map_err(|error| error.to_string())?;
             let streams = server.add("0123456789abcdef", "Win AirPlay USB Probe");
+            let second =
+                two_speakers.then(|| server.add("fedcba9876543210", "Win AirPlay USB Probe Two"));
             println!(
                 "USB/IP probe busid={} port={}",
                 streams.busid,
                 server.port()
             );
+            if let Some(second) = &second {
+                println!("USB/IP second probe busid={}", second.busid);
+            }
             if expect_pcm {
                 let deadline = Instant::now() + Duration::from_secs(seconds);
-                let mut received = 0;
-                let mut nonzero = 0;
+                let mut received = [0_usize; 2];
+                let mut nonzero = [0_usize; 2];
                 while Instant::now() < deadline {
-                    if let Some(packet) = streams.pcm.pop_timeout(Duration::from_millis(500)) {
-                        received += packet.len();
-                        nonzero += packet.iter().filter(|&&byte| byte != 0).count();
+                    for (index, source) in [Some(&streams), second.as_ref()].into_iter().enumerate()
+                    {
+                        if let Some(packet) = source
+                            .and_then(|stream| stream.pcm.pop_timeout(Duration::from_millis(100)))
+                        {
+                            received[index] += packet.len();
+                            nonzero[index] += packet.iter().filter(|&&byte| byte != 0).count();
+                        }
                     }
                 }
-                if nonzero == 0 {
-                    return Err(format!("No nonzero PCM reached the virtual USB audio endpoint ({received} bytes total)"));
+                for index in 0..if two_speakers { 2 } else { 1 } {
+                    if nonzero[index] == 0 {
+                        return Err(format!(
+                            "No nonzero PCM reached virtual USB audio endpoint {} ({} bytes total)",
+                            index + 1,
+                            received[index]
+                        ));
+                    }
+                    println!(
+                        "USB/IP speaker {} received {} PCM bytes ({} nonzero)",
+                        index + 1,
+                        received[index],
+                        nonzero[index]
+                    );
                 }
-                println!("Received {received} PCM bytes through USB/IP ({nonzero} nonzero bytes)");
             } else {
                 std::thread::sleep(Duration::from_secs(seconds));
             }
             server.remove(&streams.busid);
+            if let Some(second) = &second {
+                server.remove(&second.busid);
+            }
         }
         Action::UsbipRenderTest { endpoint } => {
             #[cfg(windows)]

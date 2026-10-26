@@ -199,23 +199,27 @@ jobs:
           if ($installer.ExitCode -notin @(0, 3010)) { throw "USBip installer returned $($installer.ExitCode)" }
           $usbip = Join-Path ${env:ProgramFiles} 'USBip\usbip.exe'
           if (-not (Test-Path $usbip)) { throw 'USBip client was not installed' }
-          $probe = Start-Process -FilePath .\probe\win-airplay.exe -ArgumentList 'usbip-probe','--seconds','30','--expect-pcm' -RedirectStandardOutput probe-out.log -RedirectStandardError probe-err.log -PassThru
+          $probe = Start-Process -FilePath .\probe\win-airplay.exe -ArgumentList 'usbip-probe','--seconds','35','--expect-pcm','--two-speakers' -RedirectStandardOutput probe-out.log -RedirectStandardError probe-err.log -PassThru
           try {
             Start-Sleep -Seconds 3
             $port = (& $usbip --tcp-port 3240 attach --remote 127.0.0.1 --bus-id 1-0123456789abcdef --once --terse | Out-String).Trim()
             if ($LASTEXITCODE -ne 0 -or $port -notmatch '^\d+$') { throw 'USBip failed to attach the virtual audio device' }
+            $port2 = (& $usbip --tcp-port 3240 attach --remote 127.0.0.1 --bus-id 1-fedcba9876543210 --once --terse | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or $port2 -notmatch '^\d+$') { throw 'USBip failed to attach the second virtual audio device' }
             try {
               $found = $false
               for ($attempt = 0; $attempt -lt 30; $attempt++) {
-                $devices = @(Get-PnpDevice -PresentOnly | Where-Object { $_.FriendlyName -like '*Win AirPlay USB Probe*' })
-                if ($devices.Count -gt 0) { $found = $true; $devices | Format-Table -AutoSize; break }
+                $devices = @(Get-PnpDevice -PresentOnly | Where-Object { $_.FriendlyName -like 'Speakers (Win AirPlay USB Probe*)' })
+                if ($devices.Count -eq 2) { $found = $true; $devices | Format-Table -AutoSize; break }
                 Start-Sleep -Seconds 1
               }
-              if (-not $found) { throw 'Windows did not enumerate the USB audio device' }
+              if (-not $found) { throw "Windows did not enumerate both USB audio outputs; found $($devices.Count)" }
               & $usbip port
               Start-Sleep -Seconds 2
               & .\probe\win-airplay.exe usbip-render-test --endpoint 'Win AirPlay USB Probe'
               if ($LASTEXITCODE -ne 0) { throw 'WASAPI render to virtual USB output failed' }
+              & .\probe\win-airplay.exe usbip-render-test --endpoint 'Win AirPlay USB Probe Two'
+              if ($LASTEXITCODE -ne 0) { throw 'WASAPI render to second virtual USB output failed' }
               & .\probe\win-airplay.exe usbip-controls-test --endpoint 'Win AirPlay USB Probe'
               if ($LASTEXITCODE -ne 0) { throw 'Windows endpoint volume or mute test failed' }
               if (-not $probe.WaitForExit(45000)) { throw 'USB/IP probe did not finish' }
@@ -223,6 +227,14 @@ jobs:
             } finally {
               & $usbip port
               Start-Process -FilePath $usbip -ArgumentList 'detach','--port',$port -Wait -PassThru | Out-Null
+              Start-Process -FilePath $usbip -ArgumentList 'detach','--port',$port2 -Wait -PassThru | Out-Null
+              $removed = $false
+              for ($attempt = 0; $attempt -lt 20; $attempt++) {
+                $remaining = @(Get-PnpDevice -PresentOnly | Where-Object { $_.FriendlyName -like 'Speakers (Win AirPlay USB Probe*)' })
+                if ($remaining.Count -eq 0) { $removed = $true; break }
+                Start-Sleep -Seconds 1
+              }
+              if (-not $removed) { throw "USB audio outputs remained after detach: $($remaining.Count)" }
             }
           } finally {
             Stop-Process -Id $probe.Id -ErrorAction SilentlyContinue
