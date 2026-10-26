@@ -452,7 +452,6 @@ fn usbip_attach(port: u16, busid: &str) -> Result<u32, String> {
             "127.0.0.1",
             "--bus-id",
             busid,
-            "--once",
             "--terse",
         ])
         .output()

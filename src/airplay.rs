@@ -62,7 +62,7 @@ impl AudioSource for UsbPcmSource {
     ) -> Result<Option<capture::AudioChunk>, Box<dyn std::error::Error + Send + Sync>> {
         if self.pending.is_empty() {
             if let Some(bytes) = self.queue.pop_timeout(Duration::from_millis(10)) {
-                for pair in bytes.chunks_exact(2) {
+                for pair in bytes.as_chunks::<2>().0 {
                     self.pending
                         .push_back(i16::from_le_bytes([pair[0], pair[1]]) as f32 / 32768.0);
                 }
