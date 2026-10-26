@@ -308,6 +308,14 @@ fn endpoint_name(speaker: &Speaker) -> String {
     format!("AirPlay {name} [{}]", &key[..8])
 }
 
+#[cfg(any(windows, test))]
+fn is_receiver_volume_echo(last: Option<(f32, Instant)>, scalar: f32, mute_changed: bool) -> bool {
+    !mute_changed
+        && last.is_some_and(|(reported, at)| {
+            at.elapsed() < Duration::from_secs(3) && (reported - scalar).abs() < 0.02
+        })
+}
+
 fn resolve_target(target: &str) -> Result<SocketAddr, String> {
     if let Ok(address) = target.parse::<SocketAddr>() {
         return Ok(address);
@@ -730,6 +738,7 @@ fn run_usbip_manager() -> Result<(), String> {
         channel_gains: [f32; 2],
         stream: Option<airplay::StreamHandle>,
         remote_volume: Option<mpsc::Receiver<f32>>,
+        last_receiver_volume: Option<(f32, Instant)>,
         port: Option<u32>,
         last_attach: Instant,
         last_spawn: Instant,
@@ -864,6 +873,7 @@ fn run_usbip_manager() -> Result<(), String> {
                             stream.stop();
                         }
                         managed.remote_volume = None;
+                        managed.last_receiver_volume = None;
                         managed.target = target;
                     }
                     managed.profile = profile;
@@ -896,6 +906,7 @@ fn run_usbip_manager() -> Result<(), String> {
                         channel_gains: [1.0, 1.0],
                         stream: None,
                         remote_volume: None,
+                        last_receiver_volume: None,
                         port,
                         last_attach: Instant::now(),
                         last_spawn: Instant::now() - Duration::from_secs(10),
@@ -942,36 +953,47 @@ fn run_usbip_manager() -> Result<(), String> {
                     stream.set_channel_gains(volume.channels.to_vec());
                 }
             }
-            // Refresh the slider when a stream starts. Polling every idle
-            // endpoint creates COM work even when nothing is playing.
-            if managed.stream.is_some() && (check_volume || volume_changed) {
-                if let Ok(volume) = windows_audio::render_output_volume(&managed.endpoint) {
-                    if (managed.slider_volume.scalar - volume.scalar).abs() >= 0.005
-                        || managed.slider_volume.muted != volume.muted
-                    {
-                        if managed.slider_volume.muted != volume.muted {
-                            eprintln!(
-                                "Windows endpoint mute changed: {} muted={} volume={:.3}",
-                                managed.endpoint, volume.muted, volume.scalar
-                            );
-                        }
-                        managed.slider_volume = volume;
-                        if let Some(stream) = &managed.stream {
-                            stream.set_volume(volume);
-                        }
-                    }
-                }
-            }
             if let Some(remote) = &managed.remote_volume {
                 while let Ok(scalar) = remote.try_recv() {
                     eprintln!(
                         "AirPlay receiver volume event: {} volume={scalar:.3}",
                         managed.endpoint
                     );
-                    managed.slider_volume.scalar = scalar;
                     if let Err(error) = windows_audio::set_render_volume(&managed.endpoint, scalar)
                     {
                         eprintln!("Could not mirror speaker volume to Windows: {error}");
+                    } else {
+                        managed.slider_volume.scalar = scalar;
+                        managed.last_receiver_volume = Some((scalar, Instant::now()));
+                    }
+                }
+            }
+            // Refresh the slider when a stream starts. A receiver-origin update
+            // can trigger Windows notifications, but must not be sent back to
+            // the same receiver as a new volume command.
+            if managed.stream.is_some() && (check_volume || volume_changed) {
+                if let Ok(volume) = windows_audio::render_output_volume(&managed.endpoint) {
+                    if (managed.slider_volume.scalar - volume.scalar).abs() >= 0.005
+                        || managed.slider_volume.muted != volume.muted
+                    {
+                        let mute_changed = managed.slider_volume.muted != volume.muted;
+                        if mute_changed {
+                            eprintln!(
+                                "Windows endpoint mute changed: {} muted={} volume={:.3}",
+                                managed.endpoint, volume.muted, volume.scalar
+                            );
+                        }
+                        managed.slider_volume = volume;
+                        let receiver_echo = is_receiver_volume_echo(
+                            managed.last_receiver_volume,
+                            volume.scalar,
+                            mute_changed,
+                        );
+                        if !receiver_echo {
+                            if let Some(stream) = &managed.stream {
+                                stream.set_volume(volume);
+                            }
+                        }
                     }
                 }
             }
@@ -993,6 +1015,7 @@ fn run_usbip_manager() -> Result<(), String> {
                     );
                 }
                 managed.remote_volume = None;
+                managed.last_receiver_volume = None;
             }
             if managed.port.is_some()
                 && managed.stream.is_none()
@@ -1017,6 +1040,7 @@ fn run_usbip_manager() -> Result<(), String> {
                     Some(remote_tx),
                 ));
                 managed.remote_volume = Some(remote_rx);
+                managed.last_receiver_volume = None;
                 managed.last_spawn = Instant::now();
             }
         }
@@ -1053,6 +1077,14 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn receiver_volume_echo_does_not_hide_windows_mute() {
+        let recent = Some((0.6, Instant::now()));
+        assert!(is_receiver_volume_echo(recent, 0.61, false));
+        assert!(!is_receiver_volume_echo(recent, 0.61, true));
+        assert!(!is_receiver_volume_echo(recent, 0.3, false));
+    }
 
     #[test]
     fn direct_target_uses_airplay_port() {

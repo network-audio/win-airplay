@@ -25,6 +25,12 @@ impl Volume {
     }
 }
 
+/// A zero event without a preceding move toward zero is ambiguous: some
+/// receivers send it as an unsolicited status update while audio is playing.
+fn accept_receiver_volume(current: f32, incoming: f32) -> bool {
+    incoming > 0.001 || current <= 0.15
+}
+
 #[derive(Debug)]
 enum Control {
     Volume(Volume),
@@ -321,6 +327,7 @@ async fn run_session(
         volume.receiver_db()
     );
     let mut remote_commands = session.take_remote_commands();
+    let mut current_volume = volume.scalar;
     let mut feedback = tokio::time::interval(Duration::from_secs(2));
     feedback.tick().await;
     let mut report = tokio::time::interval(Duration::from_secs(10));
@@ -332,6 +339,8 @@ async fn run_session(
                 Some(Control::Volume(volume)) => {
                     if let Err(error) = session.set_volume(volume.receiver_db()).await {
                         eprintln!("Could not update receiver volume: {error}");
+                    } else {
+                        current_volume = volume.scalar;
                     }
                 }
                 Some(Control::Stop) | None => break,
@@ -343,6 +352,11 @@ async fn run_session(
                 }
             } => match command {
                 Some(raop::ap2::remote::Command::Volume(value)) => {
+                    if !accept_receiver_volume(current_volume, value) {
+                        eprintln!("Ignoring abrupt receiver zero volume: target={target} current={current_volume:.3} reported={value:.3}");
+                        continue;
+                    }
+                    current_volume = value;
                     if let Some(sender) = &remote_volume {
                         let _ = sender.send(value.clamp(0.0, 1.0));
                     }
@@ -385,6 +399,13 @@ async fn run_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn receiver_zero_needs_volume_near_zero() {
+        assert!(!accept_receiver_volume(0.55, 0.0));
+        assert!(accept_receiver_volume(0.55, 0.45));
+        assert!(accept_receiver_volume(0.10, 0.0));
+    }
 
     #[test]
     fn balance_applies_channel_gain_to_captured_audio() {
