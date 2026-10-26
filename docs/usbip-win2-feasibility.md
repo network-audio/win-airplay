@@ -10,7 +10,7 @@ This is a substantially different audio backend from SysVAD. Keep the current ba
 
 - `win-airplay run-usbip` discovers reachable AirPlay speakers and maintains one virtual USB speaker per receiver. The server binds only to `127.0.0.1:3240` and uses the installed usbip-win2 `usbip.exe` to attach and detach them. It does not set the Windows default output.
 - The all-Rust USB/IP server handles device listing, import, enumeration, USB Audio 1.0 descriptors and controls, isochronous OUT PCM, and unplug on disappearance. It forwards 44.1 kHz stereo PCM to the existing in-process Nyx AirPlay sender. Windows master volume and mute map to AirPlay; channel gains apply to PCM. Receiver volume changes update the virtual device state and, when selected, the Windows endpoint control.
-- `win-airplay usbip-probe` exports a fixed test speaker for a Windows enumeration test. The branch has a separate bundled-installer preview and a manual GitHub Actions Windows attach smoke test. The bundled upstream release is pinned by SHA-256 and includes its BSD license.
+- `win-airplay usbip-probe` exports a fixed test speaker for a Windows enumeration test. The branch has a separate bundled-installer preview and a GitHub Actions Windows attach smoke job. The bundled upstream release is pinned by SHA-256 and includes its BSD license.
 - Local protocol tests pass for device list/import, configuration descriptor, volume control, and isochronous PCM. Windows cross-target Clippy passes. No real Windows USB attachment or audible playback has passed yet.
 
 ## Evidence
@@ -28,6 +28,6 @@ This is a substantially different audio backend from SysVAD. Keep the current ba
 
 ## Go/no-go experiment on Windows
 
-Run the manual `USB/IP Windows device smoke test` workflow on this branch. It installs the pinned upstream release on an ephemeral Windows runner, starts `usbip-probe`, attaches to localhost, and looks for the PnP device. Then test the preview installer with a real AirPlay receiver on a Windows machine: confirm it appears in the sound picker and passes audible PCM. Verify volume, mute, balance, attach/detach, hot discovery, active-speaker loss, and long playback under load. Record latency and check for USB/IP or audio-stack errors. Finally test with Test Mode off and Secure Boot on. GitHub Actions can validate enumeration and packages, but cannot establish audible playback or reliability without a Windows hardware test host.
+The `Build and test` workflow runs a Windows smoke job on this branch. It installs the pinned upstream release on an ephemeral Windows runner, starts `usbip-probe`, attaches to localhost, and looks for the PnP device. Then test the preview installer with a real AirPlay receiver on a Windows machine: confirm it appears in the sound picker and passes audible PCM. Verify volume, mute, balance, attach/detach, hot discovery, active-speaker loss, and long playback under load. Record latency and check for USB/IP or audio-stack errors. Finally test with Test Mode off and Secure Boot on. GitHub Actions can validate enumeration and packages, but cannot establish audible playback or reliability without a Windows hardware test host.
 
 **Current status:** Rust server, AirPlay bridge, installer preview and protocol tests implemented; Windows attach and audible playback pending.
