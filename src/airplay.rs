@@ -288,11 +288,13 @@ async fn run_session(
 ) -> Result<(), String> {
     let config = Ap2Config {
         target,
-        // Give receivers their native buffering window. The previous -100 ms
-        // setting left little room for Windows USB capture and Wi-Fi jitter.
-        latency_frames: 0,
+        // Receivers such as The Frame need audio packets well ahead of their
+        // scheduled play time. 1.5 s matches the AirPlay 2 sender timing used
+        // by pyatv and has also played clearly on Kitchen.
+        latency_frames: 66_150,
         volume_db: volume.receiver_db(),
         quiet_mode: false,
+        initial_progress: true,
         ..Default::default()
     };
     let metrics = Arc::new(PipelineMetricsTracker::new(DEFAULT_RING_BUFFER_PACKETS));
