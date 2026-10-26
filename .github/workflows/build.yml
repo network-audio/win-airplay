@@ -67,7 +67,7 @@ jobs:
           $inf2cat = Get-ChildItem "$kitBin\*\x86\inf2cat.exe", "$kitBin\*\x64\inf2cat.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
           $signtool = Get-ChildItem "$kitBin\*\x64\signtool.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $inf2cat) { $inf2cat = Get-ChildItem .\packages -Recurse -Filter inf2cat.exe -File | Select-Object -First 1 }
-          if (-not $signtool) { $signtool = Get-ChildItem .\packages -Recurse -Filter signtool.exe -File | Where-Object FullName -Match '\\x64\\' | Select-Object -First 1 }
+          if (-not $signtool) { $signtool = Get-ChildItem .\packages -Recurse -Filter signtool.exe -File | Select-Object -First 1 }
           if (-not $inf2cat -or -not $signtool) { throw "Inf2Cat or SignTool missing from Windows Kits and restored packages. Inf2Cat=$($inf2cat.FullName), SignTool=$($signtool.FullName)" }
           $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Win AirPlay Development Test' -CertStoreLocation Cert:\CurrentUser\My -HashAlgorithm SHA256
           Export-Certificate -Cert $cert -FilePath test-driver-package/WinAirPlayTest.cer | Out-Null
