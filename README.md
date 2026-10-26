@@ -2,6 +2,8 @@
 
 Win AirPlay adds discovered AirPlay 2 speakers to the standard Windows sound output picker. Select a speaker to send Windows audio to it. The controller keeps an output for each reachable speaker and removes it when the speaker disappears; it does not switch your default output.
 
+<img width="538" height="694" alt="Image" src="https://github.com/user-attachments/assets/9803736c-e54c-436c-a61f-c6c389563071" />
+
 ## Install the Windows preview
 
 1. Download `win-airplay-installer-usbip-preview` from the artifacts of the [latest successful main build](https://github.com/stakach/win-airplay/actions/workflows/build.yml?query=branch%3Amain).
