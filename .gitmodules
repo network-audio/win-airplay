@@ -1,0 +1,3 @@
+[submodule "vendor/nyx-refrain"]
+	path = vendor/nyx-refrain
+	url = https://github.com/pStrikeZ/Nyx-Refrain.git

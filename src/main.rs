@@ -4,12 +4,14 @@ use serde::Serialize;
 #[cfg(any(windows, test))]
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::net::IpAddr;
-use std::process::{Command, ExitCode};
+use std::net::{IpAddr, SocketAddr};
+use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 const SERVICE_TYPES: [&str; 2] = ["_airplay._tcp.local.", "_raop._tcp.local."];
 
+#[cfg(windows)]
+mod airplay;
 #[cfg(windows)]
 mod windows_audio;
 #[cfg(windows)]
@@ -31,7 +33,7 @@ enum Action {
         #[arg(long)]
         json: bool,
     },
-    /// Stream system audio using the separately installed MIT-licensed nyxr sender.
+    /// Stream audio using the integrated AirPlay sender.
     Stream {
         /// Speaker name, IP address, or IP:port.
         #[arg(long)]
@@ -39,9 +41,6 @@ enum Action {
         /// Capture from this Windows render endpoint by WASAPI loopback.
         #[arg(long)]
         endpoint: Option<String>,
-        /// Path to the nyxr executable, or resolve it from PATH.
-        #[arg(long, default_value = "nyxr")]
-        sender: String,
         /// Send a test tone instead of system audio.
         #[arg(long)]
         test_tone: bool,
@@ -49,11 +48,8 @@ enum Action {
         #[arg(long, default_value_t = 3)]
         duration: u32,
     },
-    /// Keep one Windows output endpoint and sender for each discovered AirPlay device.
-    Run {
-        #[arg(long, default_value = "nyxr")]
-        sender: String,
-    },
+    /// Keep one Windows output endpoint for each discovered AirPlay device.
+    Run,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -143,32 +139,18 @@ fn endpoint_name(speaker: &Speaker) -> String {
     format!("AirPlay {name} [{}]", &key[..8])
 }
 
-fn sender_args(
-    target: &str,
-    endpoint: Option<&str>,
-    test_tone: bool,
-    duration: u32,
-) -> Vec<String> {
-    let mut args = vec![
-        "stream".into(),
-        "--target".into(),
-        target.into(),
-        "--audible".into(),
-    ];
-    if test_tone {
-        args.extend([
-            "--source".into(),
-            "sine".into(),
-            "--duration".into(),
-            duration.to_string(),
-        ]);
-    } else {
-        args.extend(["--source".into(), "wasapi".into()]);
-        if let Some(endpoint) = endpoint {
-            args.extend(["--device".into(), endpoint.into()]);
-        }
+fn resolve_target(target: &str) -> Result<SocketAddr, String> {
+    if let Ok(address) = target.parse::<SocketAddr>() {
+        return Ok(address);
     }
-    args
+    if let Ok(address) = target.parse::<IpAddr>() {
+        return Ok(SocketAddr::new(address, 7000));
+    }
+    discover(4)?
+        .into_iter()
+        .find(|speaker| speaker.name.eq_ignore_ascii_case(target))
+        .map(|speaker| SocketAddr::new(speaker.address, speaker.port))
+        .ok_or_else(|| format!("AirPlay speaker {target:?} was not found"))
 }
 
 fn run(cli: Cli) -> Result<(), String> {
@@ -194,134 +176,193 @@ fn run(cli: Cli) -> Result<(), String> {
         Action::Stream {
             target,
             endpoint,
-            sender,
             test_tone,
             duration,
         } => {
-            if !test_tone && !cfg!(windows) {
-                return Err(
-                    "WASAPI capture requires Windows; use --test-tone to test the sender elsewhere"
-                        .into(),
-                );
+            let target = resolve_target(&target)?;
+            if test_tone {
+                #[cfg(windows)]
+                {
+                    airplay::test_tone(target, Duration::from_secs(duration.into()))?;
+                    return Ok(());
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = duration;
+                    return Err("integrated AirPlay transport currently builds for Windows".into());
+                }
             }
-            let args = sender_args(&target, endpoint.as_deref(), test_tone, duration);
-            let status = Command::new(&sender)
-                .args(&args)
-                .status()
-                .map_err(|e| format!("could not launch {sender}: {e}"))?;
-            if !status.success() {
-                return Err(format!("{sender} exited with {status}"));
-            }
+            run_manual_stream(target, endpoint)?;
         }
-        Action::Run { sender } => run_manager(sender)?,
+        Action::Run => run_manager()?,
     }
     Ok(())
 }
 
 #[cfg(windows)]
-fn run_manager(sender: String) -> Result<(), String> {
-    use std::process::Child;
+fn run_manual_stream(target: SocketAddr, endpoint: Option<String>) -> Result<(), String> {
+    let endpoint = endpoint.unwrap_or_else(|| "AirPlay".into());
+    let stream = airplay::StreamHandle::start(
+        target,
+        endpoint,
+        airplay::Volume {
+            scalar: 0.5,
+            muted: false,
+        },
+    );
+    while !stream.is_finished() {
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn run_manual_stream(_target: SocketAddr, _endpoint: Option<String>) -> Result<(), String> {
+    Err("WASAPI capture requires Windows".into())
+}
+
+#[cfg(windows)]
+fn run_manager() -> Result<(), String> {
+    use std::sync::mpsc;
     use windows_device::SoftwareDevice;
 
     struct Managed {
         _device: SoftwareDevice,
         endpoint: String,
-        target: String,
-        child: Option<Child>,
+        target: SocketAddr,
+        stream: Option<airplay::StreamHandle>,
+        last_volume: Option<airplay::Volume>,
         last_spawn: Instant,
         missed_scans: u8,
     }
 
     windows_audio::initialize()?;
+    let (discovery_tx, discovery_rx) = mpsc::channel();
+    std::thread::spawn(move || loop {
+        match discover(4) {
+            Ok(speakers) => {
+                let reachable: Vec<_> = speakers
+                    .into_iter()
+                    .filter(|speaker| {
+                        let address = SocketAddr::new(speaker.address, speaker.port);
+                        std::net::TcpStream::connect_timeout(&address, Duration::from_millis(400))
+                            .is_ok()
+                    })
+                    .collect();
+                if discovery_tx.send(reachable).is_err() {
+                    break;
+                }
+            }
+            Err(error) => eprintln!("AirPlay discovery failed: {error}"),
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    });
     let mut active: BTreeMap<String, Managed> = BTreeMap::new();
     loop {
-        let speakers = discover(4)?;
-        for speaker in speakers
-            .into_iter()
-            .filter(|speaker| speaker.service == SERVICE_TYPES[0])
-        {
-            let key = speaker_key(&speaker);
-            let endpoint = endpoint_name(&speaker);
-            let target = speaker.address.to_string();
-            if let Some(managed) = active.get_mut(&key) {
-                managed.missed_scans = 0;
-                if managed.target != target {
-                    if let Some(mut child) = managed.child.take() {
-                        let _ = child.kill();
-                        let _ = child.wait();
+        while let Ok(speakers) = discovery_rx.try_recv() {
+            for managed in active.values_mut() {
+                managed.missed_scans = managed.missed_scans.saturating_add(1);
+            }
+            for speaker in speakers
+                .into_iter()
+                .filter(|speaker| speaker.service == SERVICE_TYPES[0])
+            {
+                let key = speaker_key(&speaker);
+                let endpoint = endpoint_name(&speaker);
+                let target = SocketAddr::new(speaker.address, speaker.port);
+                if let Some(managed) = active.get_mut(&key) {
+                    managed.missed_scans = 0;
+                    if managed.target != target {
+                        if let Some(stream) = managed.stream.take() {
+                            stream.stop();
+                        }
+                    }
+                    managed.target = target;
+                    continue;
+                }
+                match SoftwareDevice::create(&key, &endpoint) {
+                    Ok(device) => {
+                        println!("Created output {endpoint} for {target}");
+                        active.insert(
+                            key,
+                            Managed {
+                                _device: device,
+                                endpoint,
+                                target,
+                                stream: None,
+                                last_volume: None,
+                                last_spawn: Instant::now() - Duration::from_secs(10),
+                                missed_scans: 0,
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!("Could not create output for {}: {error}", speaker.name)
                     }
                 }
-                managed.target = target;
-                continue;
             }
-            match SoftwareDevice::create(&key, &endpoint) {
-                Ok(device) => {
-                    println!("Created output {endpoint} for {}", speaker.address);
-                    active.insert(
-                        key,
-                        Managed {
-                            _device: device,
-                            endpoint,
-                            target,
-                            child: None,
-                            last_spawn: Instant::now() - Duration::from_secs(10),
-                            missed_scans: 0,
-                        },
-                    );
+            active.retain(|_, managed| {
+                if managed.missed_scans < 3 {
+                    true
+                } else {
+                    if let Some(stream) = managed.stream.take() {
+                        stream.stop();
+                    }
+                    println!("Removed output {}", managed.endpoint);
+                    false
                 }
-                Err(error) => eprintln!("Could not create output for {}: {error}", speaker.name),
-            }
+            });
         }
 
-        let default_output = windows_audio::default_render_name().unwrap_or_default();
+        let default_output = windows_audio::default_render_output().ok();
         for managed in active.values_mut() {
-            managed.missed_scans = managed.missed_scans.saturating_add(1);
-            let selected = default_output.contains(&managed.endpoint);
+            let selected = default_output
+                .as_ref()
+                .is_some_and(|output| output.name.contains(&managed.endpoint));
             if !selected {
-                if let Some(mut child) = managed.child.take() {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                if let Some(stream) = managed.stream.take() {
+                    stream.stop();
                 }
+                managed.last_volume = None;
                 continue;
             }
-            if let Some(child) = managed.child.as_mut() {
-                if child.try_wait().map_err(|e| e.to_string())?.is_some() {
-                    managed.child = None;
-                }
+            if managed
+                .stream
+                .as_ref()
+                .is_some_and(|stream| stream.is_finished())
+            {
+                managed.stream = None;
+                managed.last_volume = None;
             }
             if managed.missed_scans < 3
-                && managed.child.is_none()
+                && managed.stream.is_none()
                 && managed.last_spawn.elapsed() >= Duration::from_secs(5)
             {
-                let mut args = sender_args(&managed.target, Some(&managed.endpoint), false, 0);
-                args.push("--stats".into());
-                match Command::new(&sender).args(args).spawn() {
-                    Ok(child) => {
-                        managed.child = Some(child);
-                        managed.last_spawn = Instant::now();
-                    }
-                    Err(error) => eprintln!("Could not start {sender}: {error}"),
+                let volume = default_output.as_ref().expect("selected output").volume;
+                managed.stream = Some(airplay::StreamHandle::start(
+                    managed.target,
+                    managed.endpoint.clone(),
+                    volume,
+                ));
+                managed.last_volume = Some(volume);
+                managed.last_spawn = Instant::now();
+            } else if let (Some(stream), Some(output)) = (&managed.stream, &default_output) {
+                let changed = managed.last_volume.is_none_or(|last| {
+                    last.muted != output.volume.muted
+                        || (last.scalar - output.volume.scalar).abs() >= 0.005
+                });
+                if changed {
+                    stream.set_volume(output.volume);
+                    managed.last_volume = Some(output.volume);
                 }
             }
         }
-        active.retain(|_, managed| {
-            if managed.missed_scans < 3 {
-                true
-            } else {
-                if let Some(mut child) = managed.child.take() {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
-                println!("Removed output {}", managed.endpoint);
-                false
-            }
-        });
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(Duration::from_millis(150));
     }
 }
 
 #[cfg(not(windows))]
-fn run_manager(_sender: String) -> Result<(), String> {
+fn run_manager() -> Result<(), String> {
     Err("dynamic audio endpoints require Windows".into())
 }
 
@@ -340,36 +381,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sender_uses_selected_endpoint() {
+    fn direct_target_uses_airplay_port() {
         assert_eq!(
-            sender_args("Kitchen", Some("Win AirPlay"), false, 3),
-            [
-                "stream",
-                "--target",
-                "Kitchen",
-                "--audible",
-                "--source",
-                "wasapi",
-                "--device",
-                "Win AirPlay"
-            ]
-        );
-    }
-
-    #[test]
-    fn test_tone_ignores_capture_endpoint() {
-        assert_eq!(
-            sender_args("Kitchen", Some("Win AirPlay"), true, 2),
-            [
-                "stream",
-                "--target",
-                "Kitchen",
-                "--audible",
-                "--source",
-                "sine",
-                "--duration",
-                "2"
-            ]
+            resolve_target("192.0.2.1").unwrap().to_string(),
+            "192.0.2.1:7000"
         );
     }
 

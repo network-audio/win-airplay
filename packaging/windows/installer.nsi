@@ -32,7 +32,6 @@ Section "Win AirPlay" Main
   SetRegView 64
   SetOutPath "$INSTDIR"
   File "${DIST_DIR}\win-airplay.exe"
-  File "${DIST_DIR}\nyxr.exe"
   File "${DIST_DIR}\install.ps1"
   File "${DIST_DIR}\run.ps1"
   File "${DIST_DIR}\test-playback.ps1"
@@ -63,7 +62,6 @@ Section "Uninstall"
   nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\install.ps1" -Action Uninstall'
   Pop $0
   Delete "$INSTDIR\win-airplay.exe"
-  Delete "$INSTDIR\nyxr.exe"
   Delete "$INSTDIR\install.ps1"
   Delete "$INSTDIR\run.ps1"
   Delete "$INSTDIR\test-playback.ps1"

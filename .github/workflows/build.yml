@@ -13,6 +13,8 @@ jobs:
         os: [ubuntu-latest, windows-2025]
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -92,18 +94,8 @@ jobs:
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
         with:
-          repository: pStrikeZ/Nyx-Refrain
-          ref: 167d0a7e48724946b37f779e4e4a70df22e38059
-          path: nyx
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: mlugg/setup-zig@v2
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: nyx
-      - name: Build AirPlay sender
-        run: cargo build --release --locked --package nyxr --manifest-path nyx/Cargo.toml
+          submodules: true
       - uses: actions/download-artifact@v4
         with:
           name: win-airplay-controller-x64
@@ -115,8 +107,7 @@ jobs:
       - name: Stage and compile installer preview
         shell: pwsh
         run: |
-          Copy-Item nyx/target/release/nyxr.exe staging/
-          Copy-Item nyx/LICENSE staging/NYX-LICENSE.txt
+          Copy-Item vendor/nyx-refrain/LICENSE staging/NYX-LICENSE.txt
           Copy-Item driver/MICROSOFT-PUBLIC-LICENSE.txt staging/
           Copy-Item packaging/windows/install.ps1 staging/
           Copy-Item packaging/windows/run.ps1 staging/

@@ -13,8 +13,8 @@ for ($i = 0; $i -lt 3; $i++) {
 }
 Start-Sleep -Seconds 2
 
-$senders = @(Get-Process nyxr -ErrorAction SilentlyContinue)
-Write-Host "Nyx sender processes: $($senders.Count)"
+$controllers = @(Get-Process win-airplay -ErrorAction SilentlyContinue)
+Write-Host "Win AirPlay controller processes: $($controllers.Count)"
 if (Test-Path $log) {
     Write-Host "Controller log: $log"
     Get-Content $log -Tail 30
