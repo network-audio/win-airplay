@@ -15,6 +15,8 @@ const VERSION: u16 = 0x0111;
 const MAX_TRANSFER: usize = 1024 * 1024;
 const MAX_ISO_PACKETS: usize = 1024;
 const EPIPE: i32 = -32;
+static URB_ERRORS_LOGGED: AtomicU32 = AtomicU32::new(0);
+static URBS_TRACED: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Volume {
@@ -125,11 +127,7 @@ impl Server {
                                 .name("airplay-usbip-client".into())
                                 .spawn(move || {
                                     if let Err(error) = serve_client(stream, &devices, &stop) {
-                                        if error.kind() != io::ErrorKind::UnexpectedEof
-                                            && error.kind() != io::ErrorKind::ConnectionReset
-                                        {
-                                            eprintln!("USB/IP client ended: {error}");
-                                        }
+                                        eprintln!("USB/IP client ended: {error}");
                                     }
                                 });
                         }
@@ -363,6 +361,12 @@ fn serve_imported(stream: &mut TcpStream, device: &Device, stop: &AtomicBool) ->
                 let setup: [u8; 8] = header[40..48].try_into().unwrap();
                 let (status, data, actual, iso_reply) =
                     handle_submit(device, ep, direction, setup, length, &payload, &iso);
+                if URBS_TRACED.fetch_add(1, Ordering::Relaxed) < 80 {
+                    eprintln!("USB/IP URB: ep={ep} direction={direction} setup={setup:02x?} length={length} packets={packets} status={status} actual={actual}");
+                }
+                if status != 0 && URB_ERRORS_LOGGED.fetch_add(1, Ordering::Relaxed) < 20 {
+                    eprintln!("USB/IP URB failed: ep={ep} direction={direction} setup={setup:02x?} length={length} packets={packets} status={status}");
+                }
                 let mut out = Vec::with_capacity(48 + data.len() + iso_reply.len());
                 put_u32(&mut out, 3);
                 put_u32(&mut out, seq);

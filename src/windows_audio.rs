@@ -121,17 +121,19 @@ pub fn play_test_tone(expected_name: &str, duration: std::time::Duration) -> Res
     unsafe { client.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 500_000, 0, &format, None) }
         .map_err(|error| format!("WASAPI render initialization failed: {error}"))?;
     let render: IAudioRenderClient =
-        unsafe { client.GetService() }.map_err(|error| error.to_string())?;
-    let buffer_frames = unsafe { client.GetBufferSize() }.map_err(|error| error.to_string())?;
-    unsafe { client.Start() }.map_err(|error| error.to_string())?;
+        unsafe { client.GetService() }.map_err(|error| format!("GetService: {error}"))?;
+    let buffer_frames =
+        unsafe { client.GetBufferSize() }.map_err(|error| format!("GetBufferSize: {error}"))?;
+    unsafe { client.Start() }.map_err(|error| format!("Start: {error}"))?;
     let deadline = std::time::Instant::now() + duration;
     let mut frame = 0_u64;
     while std::time::Instant::now() < deadline {
-        let padding = unsafe { client.GetCurrentPadding() }.map_err(|error| error.to_string())?;
+        let padding = unsafe { client.GetCurrentPadding() }
+            .map_err(|error| format!("GetCurrentPadding: {error}"))?;
         let available = buffer_frames.saturating_sub(padding).min(441);
         if available > 0 {
-            let buffer =
-                unsafe { render.GetBuffer(available) }.map_err(|error| error.to_string())?;
+            let buffer = unsafe { render.GetBuffer(available) }
+                .map_err(|error| format!("GetBuffer: {error}"))?;
             let samples = unsafe {
                 std::slice::from_raw_parts_mut(buffer.cast::<i16>(), available as usize * 2)
             };
@@ -142,9 +144,10 @@ pub fn play_test_tone(expected_name: &str, duration: std::time::Duration) -> Res
                 stereo[1] = sample;
                 frame += 1;
             }
-            unsafe { render.ReleaseBuffer(available, 0) }.map_err(|error| error.to_string())?;
+            unsafe { render.ReleaseBuffer(available, 0) }
+                .map_err(|error| format!("ReleaseBuffer: {error}"))?;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    unsafe { client.Stop() }.map_err(|error| error.to_string())
+    unsafe { client.Stop() }.map_err(|error| format!("Stop: {error}"))
 }
