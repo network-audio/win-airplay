@@ -646,7 +646,7 @@ fn run_manager() -> Result<(), String> {
                         } else {
                             managed.last_volume = Some(airplay::Volume {
                                 scalar,
-                                muted: scalar <= 0.0,
+                                muted: output.volume.muted,
                             });
                             remote_applied = true;
                         }
@@ -726,6 +726,7 @@ fn run_usbip_manager() -> Result<(), String> {
         pcm: Arc<usbip_audio::PcmQueue>,
         volume_events: mpsc::Receiver<usbip_audio::Volume>,
         slider_volume: airplay::Volume,
+        usb_muted: bool,
         channel_gains: [f32; 2],
         stream: Option<airplay::StreamHandle>,
         remote_volume: Option<mpsc::Receiver<f32>>,
@@ -891,6 +892,7 @@ fn run_usbip_manager() -> Result<(), String> {
                             scalar: 1.0,
                             muted: false,
                         },
+                        usb_muted: false,
                         channel_gains: [1.0, 1.0],
                         stream: None,
                         remote_volume: None,
@@ -928,6 +930,13 @@ fn run_usbip_manager() -> Result<(), String> {
             let mut volume_changed = false;
             while let Ok(volume) = managed.volume_events.try_recv() {
                 volume_changed = true;
+                if managed.usb_muted != volume.muted {
+                    eprintln!(
+                        "USB audio mute changed: {} muted={}",
+                        managed.endpoint, volume.muted
+                    );
+                    managed.usb_muted = volume.muted;
+                }
                 managed.channel_gains = volume.channels;
                 if let Some(stream) = &managed.stream {
                     stream.set_channel_gains(volume.channels.to_vec());
@@ -940,6 +949,12 @@ fn run_usbip_manager() -> Result<(), String> {
                     if (managed.slider_volume.scalar - volume.scalar).abs() >= 0.005
                         || managed.slider_volume.muted != volume.muted
                     {
+                        if managed.slider_volume.muted != volume.muted {
+                            eprintln!(
+                                "Windows endpoint mute changed: {} muted={} volume={:.3}",
+                                managed.endpoint, volume.muted, volume.scalar
+                            );
+                        }
                         managed.slider_volume = volume;
                         if let Some(stream) = &managed.stream {
                             stream.set_volume(volume);
@@ -949,8 +964,11 @@ fn run_usbip_manager() -> Result<(), String> {
             }
             if let Some(remote) = &managed.remote_volume {
                 while let Ok(scalar) = remote.try_recv() {
+                    eprintln!(
+                        "AirPlay receiver volume event: {} volume={scalar:.3}",
+                        managed.endpoint
+                    );
                     managed.slider_volume.scalar = scalar;
-                    managed.slider_volume.muted = scalar <= 0.0;
                     if let Err(error) = windows_audio::set_render_volume(&managed.endpoint, scalar)
                     {
                         eprintln!("Could not mirror speaker volume to Windows: {error}");

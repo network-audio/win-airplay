@@ -51,6 +51,9 @@ pub fn default_render_output() -> Result<DefaultOutput, String> {
     })
 }
 
+/// Mirror a receiver volume change to the Windows slider. A receiver volume
+/// notification has no independent mute bit, so it must not change endpoint
+/// mute state (which Windows and USB Audio manage separately).
 pub fn set_render_volume(expected_name: &str, scalar: f32) -> Result<(), String> {
     let device = named_render_output(expected_name)?;
     let endpoint_volume: IAudioEndpointVolume =
@@ -59,14 +62,6 @@ pub fn set_render_volume(expected_name: &str, scalar: f32) -> Result<(), String>
         .map_err(|error| error.to_string())?;
     if (current - scalar).abs() >= 0.005 {
         unsafe { endpoint_volume.SetMasterVolumeLevelScalar(scalar, std::ptr::null()) }
-            .map_err(|error| error.to_string())?;
-    }
-    let muted = unsafe { endpoint_volume.GetMute() }
-        .map_err(|error| error.to_string())?
-        .as_bool();
-    let should_mute = scalar <= 0.0;
-    if muted != should_mute {
-        unsafe { endpoint_volume.SetMute(BOOL::from(should_mute), std::ptr::null()) }
             .map_err(|error| error.to_string())?;
     }
     Ok(())
@@ -195,6 +190,22 @@ pub fn test_endpoint_controls(expected_name: &str) -> Result<(), String> {
             .as_bool()
         {
             return Err("Mute control did not change".into());
+        }
+        set_render_volume(expected_name, 0.7)?;
+        if !unsafe { endpoint.GetMute() }
+            .map_err(|error| error.to_string())?
+            .as_bool()
+        {
+            return Err("Receiver volume update unexpectedly cleared Windows mute".into());
+        }
+        unsafe { endpoint.SetMute(BOOL::from(false), std::ptr::null()) }
+            .map_err(|error| format!("Clear mute: {error}"))?;
+        set_render_volume(expected_name, 0.0)?;
+        if unsafe { endpoint.GetMute() }
+            .map_err(|error| error.to_string())?
+            .as_bool()
+        {
+            return Err("Receiver volume update unexpectedly muted Windows".into());
         }
         Ok(())
     })();
