@@ -8,7 +8,7 @@ Read-Host | Out-Null
 Start-Sleep -Seconds 7
 
 $player = New-Object System.Media.SoundPlayer $tone
-Write-Host 'The tone will repeat for about 18 seconds. Adjust Windows volume, then toggle mute while it plays.'
+Write-Host 'The tone will repeat for about 18 seconds. Adjust Windows volume, mute, and channel balance while it plays.'
 for ($i = 0; $i -lt 6; $i++) {
     $player.PlaySync()
 }

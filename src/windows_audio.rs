@@ -15,6 +15,7 @@ pub fn initialize() -> Result<(), String> {
 pub struct DefaultOutput {
     pub name: String,
     pub volume: crate::airplay::Volume,
+    pub channel_gains: Vec<f32>,
 }
 
 pub fn default_render_output() -> Result<DefaultOutput, String> {
@@ -34,9 +35,16 @@ pub fn default_render_output() -> Result<DefaultOutput, String> {
     let muted = unsafe { endpoint_volume.GetMute() }
         .map_err(|error| error.to_string())?
         .as_bool();
+    let count = unsafe { endpoint_volume.GetChannelCount() }.unwrap_or(0);
+    let channel_gains = (0..count)
+        .map(|channel| {
+            unsafe { endpoint_volume.GetChannelVolumeLevelScalar(channel) }.unwrap_or(1.0)
+        })
+        .collect();
     Ok(DefaultOutput {
         name: name.to_string(),
         volume: crate::airplay::Volume { scalar, muted },
+        channel_gains,
     })
 }
 

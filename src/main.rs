@@ -209,6 +209,7 @@ fn run_manual_stream(target: SocketAddr, endpoint: Option<String>) -> Result<(),
             scalar: 0.5,
             muted: false,
         },
+        vec![1.0, 1.0],
         None,
     );
     while !stream.is_finished() {
@@ -234,6 +235,7 @@ fn run_manager() -> Result<(), String> {
         stream: Option<airplay::StreamHandle>,
         remote_volume: Option<mpsc::Receiver<f32>>,
         last_volume: Option<airplay::Volume>,
+        last_channel_gains: Vec<f32>,
         last_spawn: Instant,
         missed_scans: u8,
     }
@@ -295,6 +297,7 @@ fn run_manager() -> Result<(), String> {
                                 stream: None,
                                 remote_volume: None,
                                 last_volume: None,
+                                last_channel_gains: Vec::new(),
                                 last_spawn: Instant::now() - Duration::from_secs(10),
                                 missed_scans: 0,
                             },
@@ -330,6 +333,7 @@ fn run_manager() -> Result<(), String> {
                 }
                 managed.remote_volume = None;
                 managed.last_volume = None;
+                managed.last_channel_gains.clear();
                 continue;
             }
             if managed
@@ -340,23 +344,42 @@ fn run_manager() -> Result<(), String> {
                 managed.stream = None;
                 managed.remote_volume = None;
                 managed.last_volume = None;
+                managed.last_channel_gains.clear();
             }
             if managed.missed_scans < 3
                 && managed.stream.is_none()
                 && managed.last_spawn.elapsed() >= Duration::from_secs(5)
             {
                 let volume = default_output.as_ref().expect("selected output").volume;
+                let gains = default_output
+                    .as_ref()
+                    .expect("selected output")
+                    .channel_gains
+                    .clone();
                 let (remote_volume_tx, remote_volume_rx) = mpsc::channel();
                 managed.stream = Some(airplay::StreamHandle::start(
                     managed.target,
                     managed.endpoint.clone(),
                     volume,
+                    gains.clone(),
                     Some(remote_volume_tx),
                 ));
                 managed.remote_volume = Some(remote_volume_rx);
                 managed.last_volume = Some(volume);
+                managed.last_channel_gains = gains;
                 managed.last_spawn = Instant::now();
             } else if let (Some(stream), Some(output)) = (&managed.stream, &default_output) {
+                let balance_changed = managed.last_channel_gains.len()
+                    != output.channel_gains.len()
+                    || managed
+                        .last_channel_gains
+                        .iter()
+                        .zip(&output.channel_gains)
+                        .any(|(old, new)| (old - new).abs() >= 0.005);
+                if balance_changed {
+                    stream.set_channel_gains(output.channel_gains.clone());
+                    managed.last_channel_gains = output.channel_gains.clone();
+                }
                 let mut remote_applied = false;
                 if let Some(remote) = &managed.remote_volume {
                     while let Ok(scalar) = remote.try_recv() {

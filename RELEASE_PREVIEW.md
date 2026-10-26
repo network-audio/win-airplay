@@ -6,6 +6,6 @@ Before installing, [enable Windows Test Mode](https://learn.microsoft.com/en-us/
 
 The installer registers an elevated interactive logon task for the installing user. Logs are written to `%LOCALAPPDATA%\WinAirPlay\controller.log`. Uninstall from Windows Apps after testing. Restore the original boot settings when finished.
 
-For a playback check, select an AirPlay output in the Windows sound picker and run `test-playback.ps1` from the installed folder in PowerShell. It plays a short tone through the selected Windows output and prints the recent controller log. Check the Windows volume and mute controls, then turn off the selected speaker and confirm that its output disappears. The check still needs a person to confirm whether the receiver played the tone.
+For a playback check, select an AirPlay output in the Windows sound picker and run `test-playback.ps1` from the installed folder in PowerShell. It repeats a tone through the selected Windows output and prints the recent controller log. Check Windows volume, mute, and left/right balance, then turn off the selected speaker and confirm that its output disappears. The check still needs a person to confirm whether the receiver played the tone.
 
 This is an engineering preview, not the first stable release. Report which speakers appear in the output picker, whether selecting one routes playback, and any installation errors with the controller log and `%windir%\inf\setupapi.dev.log`.

@@ -5,6 +5,7 @@ use raop::ap2::session::{Ap2Config, Ap2Session};
 use std::net::SocketAddr;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -30,6 +31,57 @@ enum Control {
 pub struct StreamHandle {
     control: mpsc::UnboundedSender<Control>,
     worker: JoinHandle<()>,
+    channel_gains: Arc<RwLock<Vec<f32>>>,
+}
+
+struct BalancedSource {
+    inner: Box<dyn AudioSource + Send>,
+    channel_gains: Arc<RwLock<Vec<f32>>>,
+}
+
+impl AudioSource for BalancedSource {
+    fn sample_rate(&self) -> u32 {
+        self.inner.sample_rate()
+    }
+
+    fn channels(&self) -> u16 {
+        self.inner.channels()
+    }
+
+    fn read_chunk(
+        &mut self,
+        max_frames: usize,
+    ) -> Result<Option<capture::AudioChunk>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut chunk = match self.inner.read_chunk(max_frames)? {
+            Some(chunk) => chunk,
+            None => return Ok(None),
+        };
+        let gains = self
+            .channel_gains
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        let channels = chunk.channels as usize;
+        if channels > 0 {
+            for frame in chunk.data.chunks_mut(channels) {
+                for (channel, sample) in frame.iter_mut().enumerate() {
+                    *sample *= gains.get(channel).copied().unwrap_or(1.0);
+                }
+            }
+        }
+        Ok(Some(chunk))
+    }
+
+    fn start(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.start()
+    }
+
+    fn is_live(&self) -> bool {
+        self.inner.is_live()
+    }
+
+    fn stop(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.stop()
+    }
 }
 
 impl StreamHandle {
@@ -38,9 +90,12 @@ impl StreamHandle {
         target: SocketAddr,
         endpoint: String,
         initial_volume: Volume,
+        initial_channel_gains: Vec<f32>,
         remote_volume: Option<Sender<f32>>,
     ) -> Self {
         let (control, receiver) = mpsc::unbounded_channel();
+        let channel_gains = Arc::new(RwLock::new(initial_channel_gains));
+        let worker_gains = channel_gains.clone();
         let worker = thread::spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -60,9 +115,13 @@ impl StreamHandle {
                     },
                 )
                 .map_err(|error| error.to_string())?;
+                let balanced = BalancedSource {
+                    inner: Box::new(source),
+                    channel_gains: worker_gains,
+                };
                 run_session(
                     target,
-                    Box::new(source),
+                    Box::new(balanced),
                     initial_volume,
                     receiver,
                     remote_volume,
@@ -74,11 +133,22 @@ impl StreamHandle {
                 eprintln!("AirPlay stream to {target} ended: {error}");
             }
         });
-        Self { control, worker }
+        Self {
+            control,
+            worker,
+            channel_gains,
+        }
     }
 
     pub fn set_volume(&self, volume: Volume) {
         let _ = self.control.send(Control::Volume(volume));
+    }
+
+    pub fn set_channel_gains(&self, gains: Vec<f32>) {
+        *self
+            .channel_gains
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = gains;
     }
 
     pub fn is_finished(&self) -> bool {
@@ -187,6 +257,17 @@ async fn run_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn balance_applies_channel_gain_to_captured_audio() {
+        let mut source = BalancedSource {
+            inner: Box::new(SineSource::new(440.0, -12.0, 44_100, 2)),
+            channel_gains: Arc::new(RwLock::new(vec![1.0, 0.0])),
+        };
+        let chunk = source.read_chunk(256).unwrap().unwrap();
+        assert!(chunk.data.chunks_exact(2).all(|frame| frame[1] == 0.0));
+        assert!(chunk.data.chunks_exact(2).any(|frame| frame[0].abs() > 0.0));
+    }
 
     #[test]
     fn windows_volume_and_mute_map_to_receiver() {
