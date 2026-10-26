@@ -44,8 +44,9 @@ if (-not $usbip) {
 
 $launcher = Join-Path $folder 'run-usbip.ps1'
 $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-$taskAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$launcher`""
+$taskAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`""
 $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $user
 $taskPrincipal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
+Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $taskTrigger -Principal $taskPrincipal -Force | Out-Null
 Start-ScheduledTask -TaskName $taskName

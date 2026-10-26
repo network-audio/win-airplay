@@ -107,6 +107,8 @@ jobs:
           if (-not (Test-Path $pathFile)) { throw 'Installer did not save the USBip executable path' }
           $usbip = [System.IO.File]::ReadAllText($pathFile).Trim()
           if (-not (Test-Path -LiteralPath $usbip -PathType Leaf)) { throw "USBip executable is missing: $usbip" }
+          $task = Get-ScheduledTask -TaskName 'Win AirPlay USBIP'
+          if ($task.Actions.Arguments -notmatch '-WindowStyle Hidden') { throw 'Controller task is not hidden' }
           $ps32 = Join-Path $env:WINDIR 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'
           $finder = (Resolve-Path packaging/windows/find-usbip.ps1).Path.Replace("'", "''")
           $found32 = & $ps32 -NoProfile -ExecutionPolicy Bypass -Command ". '$finder'; Find-UsbipExecutable"
