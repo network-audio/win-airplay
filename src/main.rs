@@ -574,7 +574,7 @@ fn run_usbip_manager() -> Result<(), String> {
         target: SocketAddr,
         pcm: Arc<usbip_audio::PcmQueue>,
         volume_events: mpsc::Receiver<usbip_audio::Volume>,
-        volume: usbip_audio::Volume,
+        slider_volume: airplay::Volume,
         stream: Option<airplay::StreamHandle>,
         remote_volume: Option<mpsc::Receiver<f32>>,
         port: Option<u32>,
@@ -655,6 +655,7 @@ fn run_usbip_manager() -> Result<(), String> {
         let _ = mdns.shutdown();
     });
     let mut active: BTreeMap<String, Managed> = BTreeMap::new();
+    let mut last_volume_check = Instant::now() - Duration::from_secs(1);
     loop {
         while let Ok(speakers) = discovery_rx.try_recv() {
             for managed in active.values_mut() {
@@ -692,7 +693,10 @@ fn run_usbip_manager() -> Result<(), String> {
                         target,
                         pcm: streams.pcm,
                         volume_events: streams.volume,
-                        volume: usbip_audio::Volume::default(),
+                        slider_volume: airplay::Volume {
+                            scalar: 1.0,
+                            muted: false,
+                        },
                         stream: None,
                         remote_volume: None,
                         port,
@@ -717,6 +721,7 @@ fn run_usbip_manager() -> Result<(), String> {
                 false
             });
         }
+        let check_volume = last_volume_check.elapsed() >= Duration::from_secs(2);
         for managed in active.values_mut() {
             if managed.port.is_none() && managed.last_attach.elapsed() >= Duration::from_secs(5) {
                 managed.last_attach = Instant::now();
@@ -725,23 +730,30 @@ fn run_usbip_manager() -> Result<(), String> {
                     Err(error) => eprintln!("Could not attach {}: {error}", managed.endpoint),
                 }
             }
+            let mut volume_changed = false;
             while let Ok(volume) = managed.volume_events.try_recv() {
-                managed.volume = volume;
+                volume_changed = true;
                 if let Some(stream) = &managed.stream {
-                    stream.set_volume(airplay::Volume {
-                        scalar: volume.scalar,
-                        muted: volume.muted,
-                    });
                     stream.set_channel_gains(volume.channels.to_vec());
+                }
+            }
+            if check_volume || volume_changed {
+                if let Ok(volume) = windows_audio::render_output_volume(&managed.endpoint) {
+                    if (managed.slider_volume.scalar - volume.scalar).abs() >= 0.005
+                        || managed.slider_volume.muted != volume.muted
+                    {
+                        managed.slider_volume = volume;
+                        if let Some(stream) = &managed.stream {
+                            stream.set_volume(volume);
+                        }
+                    }
                 }
             }
             if let Some(remote) = &managed.remote_volume {
                 while let Ok(scalar) = remote.try_recv() {
-                    managed.volume.scalar = scalar;
-                    managed.volume.muted = scalar <= 0.0;
-                    server.set_volume(&managed.busid, managed.volume);
-                    if let Err(error) =
-                        windows_audio::set_default_volume_if_name(&managed.endpoint, scalar)
+                    managed.slider_volume.scalar = scalar;
+                    managed.slider_volume.muted = scalar <= 0.0;
+                    if let Err(error) = windows_audio::set_render_volume(&managed.endpoint, scalar)
                     {
                         eprintln!("Could not mirror speaker volume to Windows: {error}");
                     }
@@ -759,6 +771,10 @@ fn run_usbip_manager() -> Result<(), String> {
             {
                 if let Some(stream) = managed.stream.take() {
                     stream.stop();
+                    println!(
+                        "Stopped AirPlay stream for {} (idle={inactive})",
+                        managed.endpoint
+                    );
                 }
                 managed.remote_volume = None;
             }
@@ -771,20 +787,24 @@ fn run_usbip_manager() -> Result<(), String> {
                     .is_some_and(|age| age < Duration::from_secs(5))
                 && managed.last_spawn.elapsed() >= Duration::from_secs(5)
             {
+                if let Ok(volume) = windows_audio::render_output_volume(&managed.endpoint) {
+                    managed.slider_volume = volume;
+                }
                 let (remote_tx, remote_rx) = mpsc::channel();
+                println!("Starting AirPlay stream for {}", managed.endpoint);
                 managed.stream = Some(airplay::StreamHandle::start_usbip(
                     managed.target,
                     managed.pcm.clone(),
-                    airplay::Volume {
-                        scalar: managed.volume.scalar,
-                        muted: managed.volume.muted,
-                    },
+                    managed.slider_volume,
                     managed.volume.channels.to_vec(),
                     Some(remote_tx),
                 ));
                 managed.remote_volume = Some(remote_rx);
                 managed.last_spawn = Instant::now();
             }
+        }
+        if check_volume {
+            last_volume_check = Instant::now();
         }
         std::thread::sleep(Duration::from_millis(50));
     }

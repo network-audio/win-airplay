@@ -51,20 +51,8 @@ pub fn default_render_output() -> Result<DefaultOutput, String> {
     })
 }
 
-pub fn set_default_volume_if_name(expected_name: &str, scalar: f32) -> Result<(), String> {
-    let enumerator: IMMDeviceEnumerator =
-        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
-            .map_err(|error| error.to_string())?;
-    let device = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }
-        .map_err(|error| error.to_string())?;
-    let properties =
-        unsafe { device.OpenPropertyStore(STGM_READ) }.map_err(|error| error.to_string())?;
-    let name = unsafe { properties.GetValue(&PKEY_Device_FriendlyName) }
-        .map_err(|error| error.to_string())?
-        .to_string();
-    if !name.contains(expected_name) {
-        return Ok(());
-    }
+pub fn set_render_volume(expected_name: &str, scalar: f32) -> Result<(), String> {
+    let device = named_render_output(expected_name)?;
     let endpoint_volume: IAudioEndpointVolume =
         unsafe { device.Activate(CLSCTX_ALL, None) }.map_err(|error| error.to_string())?;
     let current = unsafe { endpoint_volume.GetMasterVolumeLevelScalar() }
@@ -105,6 +93,20 @@ fn named_render_output(expected_name: &str) -> Result<IMMDevice, String> {
         }
     }
     chosen.ok_or_else(|| format!("Audio endpoint containing {expected_name:?} was not found"))
+}
+
+/// Read the percentage and mute state Windows displays for a virtual output.
+/// USB Feature Unit values are decibels and do not match this slider scale.
+pub fn render_output_volume(expected_name: &str) -> Result<crate::airplay::Volume, String> {
+    let device = named_render_output(expected_name)?;
+    let endpoint: IAudioEndpointVolume =
+        unsafe { device.Activate(CLSCTX_ALL, None) }.map_err(|error| error.to_string())?;
+    let scalar =
+        unsafe { endpoint.GetMasterVolumeLevelScalar() }.map_err(|error| error.to_string())?;
+    let muted = unsafe { endpoint.GetMute() }
+        .map_err(|error| error.to_string())?
+        .as_bool();
+    Ok(crate::airplay::Volume { scalar, muted })
 }
 
 /// Render through a named endpoint without changing the system default output.

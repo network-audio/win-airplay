@@ -14,6 +14,8 @@ use std::time::Instant;
 const VERSION: u16 = 0x0111;
 const MAX_TRANSFER: usize = 1024 * 1024;
 const MAX_ISO_PACKETS: usize = 1024;
+const MAX_QUEUED_PCM_PACKETS: usize = 24;
+const ACTIVITY_SAMPLE_THRESHOLD: i16 = 64;
 const EPIPE: i32 = -32;
 static URB_ERRORS_LOGGED: AtomicU32 = AtomicU32::new(0);
 
@@ -68,18 +70,29 @@ pub struct PcmQueue {
 
 impl PcmQueue {
     fn push(&self, packet: Vec<u8>) {
-        // An idle Windows endpoint can send a continuous stream of zero-filled
-        // URBs. The sender synthesizes silence while active, so retaining those
-        // buffers only starts unnecessary AirPlay sessions and delays real audio.
-        if packet.iter().all(|byte| *byte == 0) {
+        // Windows can send tiny dither samples when no application is playing.
+        // Keep quiet packets during an active stream, but do not let them keep
+        // an idle AirPlay session alive indefinitely.
+        let active = packet.as_chunks::<2>().0.iter().any(|sample| {
+            i16::from_le_bytes(*sample).unsigned_abs() > ACTIVITY_SAMPLE_THRESHOLD as u16
+        });
+        let mut last_input = self.last_input.lock().unwrap();
+        let restarting =
+            active && last_input.is_none_or(|time| time.elapsed() >= Duration::from_secs(1));
+        if active {
+            *last_input = Some(Instant::now());
+        } else if last_input.is_none_or(|time| time.elapsed() >= Duration::from_secs(10)) {
             return;
         }
+        drop(last_input);
         let mut packets = self.packets.lock().unwrap();
-        if packets.len() == 128 {
+        if restarting {
+            packets.clear();
+        }
+        if packets.len() == MAX_QUEUED_PCM_PACKETS {
             packets.pop_front();
         }
         packets.push_back(packet);
-        *self.last_input.lock().unwrap() = Some(Instant::now());
         self.ready.notify_one();
     }
 
@@ -185,13 +198,6 @@ impl Server {
     pub fn remove(&self, busid: &str) {
         if let Some(device) = self.devices.write().unwrap().remove(busid) {
             device.active.store(false, Ordering::Release);
-        }
-    }
-
-    #[cfg(windows)]
-    pub fn set_volume(&self, busid: &str, volume: Volume) {
-        if let Some(device) = self.devices.read().unwrap().get(busid) {
-            device.state.lock().unwrap().volume = volume;
         }
     }
 }
@@ -604,10 +610,21 @@ mod tests {
     fn idle_silence_does_not_trigger_a_stream() {
         let queue = PcmQueue::default();
         queue.push(vec![0; 1764]);
+        queue.push(vec![1, 0, 2, 0]);
         assert!(!queue.has_data());
         assert!(queue.idle_for().is_none());
-        queue.push(vec![1, 0, 0, 0]);
+        queue.push(vec![100, 0, 0, 0]);
         assert!(queue.has_data());
+    }
+
+    #[test]
+    fn pcm_queue_keeps_recent_audio_only() {
+        let queue = PcmQueue::default();
+        for index in 0..(MAX_QUEUED_PCM_PACKETS + 4) {
+            queue.push(vec![100, 0, index as u8, 0]);
+        }
+        assert_eq!(queue.packets.lock().unwrap().len(), MAX_QUEUED_PCM_PACKETS);
+        assert_eq!(queue.pop_timeout(Duration::ZERO).unwrap()[2], 4);
     }
 
     #[test]
