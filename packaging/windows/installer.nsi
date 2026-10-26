@@ -41,12 +41,13 @@ Section "Win AirPlay" Main
   File "${DIST_DIR}\driver\ComponentizedAudioSample.inf"
   File "${DIST_DIR}\driver\TabletAudioSample.sys"
   File "${DIST_DIR}\driver\KeywordDetectorContosoAdapter.dll"
-  File /nonfatal "${DIST_DIR}\driver\sysvad.cat"
+  File "${DIST_DIR}\driver\sysvad.cat"
+  File "${DIST_DIR}\driver\WinAirPlayTest.cer"
 
   nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\install.ps1" -Action Install'
   Pop $0
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP "Driver or startup installation failed. A Microsoft-signed driver package is required."
+    MessageBox MB_ICONSTOP "Driver or startup installation failed. This preview requires Windows Test Mode."
     Abort
   ${EndIf}
 
@@ -67,6 +68,7 @@ Section "Uninstall"
   Delete "$INSTDIR\driver\TabletAudioSample.sys"
   Delete "$INSTDIR\driver\KeywordDetectorContosoAdapter.dll"
   Delete "$INSTDIR\driver\sysvad.cat"
+  Delete "$INSTDIR\driver\WinAirPlayTest.cer"
   RMDir "$INSTDIR\driver"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"

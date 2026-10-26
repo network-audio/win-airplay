@@ -59,6 +59,30 @@ jobs:
         with:
           name: win-airplay-driver-unsigned-x64
           path: driver-package/**
+      - name: Create a test-signed development package
+        shell: pwsh
+        run: |
+          Copy-Item driver-package test-driver-package -Recurse
+          $kitTools = Get-ChildItem .\packages -Recurse -File | Where-Object { $_.Name -in @('inf2cat.exe', 'signtool.exe') -and $_.FullName -match '\\x64\\' }
+          $inf2cat = $kitTools | Where-Object Name -eq 'inf2cat.exe' | Select-Object -First 1
+          $signtool = $kitTools | Where-Object Name -eq 'signtool.exe' | Select-Object -First 1
+          if (-not $inf2cat -or -not $signtool) { throw 'Inf2Cat or SignTool missing from WDK packages' }
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Win AirPlay Development Test' -CertStoreLocation Cert:\CurrentUser\My -HashAlgorithm SHA256
+          Export-Certificate -Cert $cert -FilePath test-driver-package/WinAirPlayTest.cer | Out-Null
+          Import-Certificate -FilePath test-driver-package/WinAirPlayTest.cer -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
+          Import-Certificate -FilePath test-driver-package/WinAirPlayTest.cer -CertStoreLocation Cert:\CurrentUser\TrustedPublisher | Out-Null
+          & $signtool.FullName sign /fd SHA256 /sha1 $cert.Thumbprint /s My test-driver-package/TabletAudioSample.sys
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $inf2cat.FullName /driver:test-driver-package /os:10_X64 /uselocaltime
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $signtool.FullName sign /fd SHA256 /sha1 $cert.Thumbprint /s My test-driver-package/sysvad.cat
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $signtool.FullName verify /v /pa test-driver-package/sysvad.cat
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-airplay-driver-test-signed-x64
+          path: test-driver-package/**
 
   installer-preview:
     needs: [rust, driver]
@@ -82,7 +106,7 @@ jobs:
           path: staging
       - uses: actions/download-artifact@v4
         with:
-          name: win-airplay-driver-unsigned-x64
+          name: win-airplay-driver-test-signed-x64
           path: staging/driver
       - name: Stage and compile installer preview
         shell: pwsh
@@ -97,10 +121,10 @@ jobs:
           }
           $nsis = (Get-Command makensis.exe -ErrorAction SilentlyContinue).Source
           if (-not $nsis) { $nsis = 'C:\Program Files (x86)\NSIS\makensis.exe' }
-          & $nsis /DVERSION=0.1.0 "/DDIST_DIR=$((Resolve-Path staging).Path)" '/DOUT_FILE=win-airplay-0.1.0-windows-x64-unsigned-preview.exe' packaging/windows/installer.nsi
+          & $nsis /DVERSION=0.1.0 "/DDIST_DIR=$((Resolve-Path staging).Path)" '/DOUT_FILE=win-airplay-0.1.0-windows-x64-test-preview.exe' packaging/windows/installer.nsi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
-          name: win-airplay-installer-unsigned-preview
-          path: win-airplay-0.1.0-windows-x64-unsigned-preview.exe
+          name: win-airplay-installer-test-preview
+          path: win-airplay-0.1.0-windows-x64-test-preview.exe
 

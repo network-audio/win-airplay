@@ -127,7 +127,7 @@ fn speaker_key(speaker: &Speaker) -> String {
         .device_id
         .clone()
         .unwrap_or_else(|| format!("{}@{}", speaker.name, speaker.address));
-    let digest = Sha256::digest(identity.as_bytes());
+    let digest = Sha256::digest(identity.to_ascii_lowercase().as_bytes());
     digest[..16]
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -136,8 +136,9 @@ fn speaker_key(speaker: &Speaker) -> String {
 
 #[cfg(windows)]
 fn endpoint_name(speaker: &Speaker) -> String {
-    let name: String = speaker.name.chars().take(180).collect();
-    format!("AirPlay {name}")
+    let name: String = speaker.name.chars().take(160).collect();
+    let key = speaker_key(speaker);
+    format!("AirPlay {name} [{}]", &key[..8])
 }
 
 fn sender_args(
@@ -373,6 +374,7 @@ mod tests {
         };
         let key = speaker_key(&speaker);
         speaker.address = "192.0.2.2".parse().unwrap();
+        speaker.device_id = Some("aa:bb:cc:dd:ee:ff".into());
         assert_eq!(speaker_key(&speaker), key);
         assert_eq!(key.len(), 32);
     }

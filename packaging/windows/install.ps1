@@ -4,6 +4,7 @@ $ErrorActionPreference = 'Stop'
 $taskName = 'Win AirPlay'
 
 if ($Action -eq 'Uninstall') {
+    Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
     exit 0
 }
@@ -14,8 +15,17 @@ $controller = Join-Path $folder 'win-airplay.exe'
 $sender = Join-Path $folder 'nyxr.exe'
 
 if (-not (Test-Path (Join-Path $folder 'driver\sysvad.cat'))) {
-    throw 'A Microsoft-signed driver catalog is required before installation.'
+    throw 'The test-signed driver catalog is missing.'
 }
+
+$boot = (& bcdedit.exe /enum '{current}' 2>&1) -join "`n"
+if ($boot -notmatch '(?im)^testsigning\s+Yes\s*$') {
+    throw 'Windows Test Mode must be enabled before installing this development driver.'
+}
+
+$certificate = Join-Path $folder 'driver\WinAirPlayTest.cer'
+Import-Certificate -FilePath $certificate -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+Import-Certificate -FilePath $certificate -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
 
 $output = & pnputil.exe /add-driver $driver /install 2>&1
 if ($LASTEXITCODE -ne 0) {
