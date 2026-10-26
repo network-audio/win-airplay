@@ -1,7 +1,8 @@
+use crate::{AudioEncoding, StreamProfile};
 use capture::sources::sine::SineSource;
 use capture::AudioSource;
 use pipeline::{PipelineMetricsTracker, DEFAULT_RING_BUFFER_PACKETS};
-use raop::ap2::session::{Ap2Config, Ap2Session};
+use raop::ap2::session::{Ap2AudioCodec, Ap2Config, Ap2Session};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
@@ -132,6 +133,7 @@ impl StreamHandle {
     pub fn start_usbip(
         target: SocketAddr,
         queue: Arc<crate::usbip_audio::PcmQueue>,
+        profile: StreamProfile,
         initial_volume: Volume,
         initial_channel_gains: Vec<f32>,
         remote_volume: Option<Sender<f32>>,
@@ -161,6 +163,7 @@ impl StreamHandle {
             if let Err(error) = runtime.block_on(run_session(
                 target,
                 Box::new(balanced),
+                profile,
                 initial_volume,
                 receiver,
                 remote_volume,
@@ -180,6 +183,7 @@ impl StreamHandle {
     pub fn start(
         target: SocketAddr,
         endpoint: String,
+        profile: StreamProfile,
         initial_volume: Volume,
         initial_channel_gains: Vec<f32>,
         remote_volume: Option<Sender<f32>>,
@@ -213,6 +217,7 @@ impl StreamHandle {
                 run_session(
                     target,
                     Box::new(balanced),
+                    profile,
                     initial_volume,
                     receiver,
                     remote_volume,
@@ -266,6 +271,7 @@ pub fn test_tone(target: SocketAddr, duration: Duration) -> Result<(), String> {
         run_session(
             target,
             Box::new(source),
+            StreamProfile::default(),
             Volume {
                 scalar: 0.35,
                 muted: false,
@@ -281,6 +287,7 @@ pub fn test_tone(target: SocketAddr, duration: Duration) -> Result<(), String> {
 async fn run_session(
     target: SocketAddr,
     source: Box<dyn AudioSource + Send>,
+    profile: StreamProfile,
     volume: Volume,
     mut control: mpsc::UnboundedReceiver<Control>,
     remote_volume: Option<Sender<f32>>,
@@ -288,10 +295,13 @@ async fn run_session(
 ) -> Result<(), String> {
     let config = Ap2Config {
         target,
-        // Receivers such as The Frame need audio packets well ahead of their
-        // scheduled play time. 1.5 s matches the AirPlay 2 sender timing used
-        // by pyatv and has also played clearly on Kitchen.
-        latency_frames: 66_150,
+        latency_frames: profile.latency_frames,
+        start_lead_ms: profile.start_lead_ms,
+        codec: match profile.encoding {
+            AudioEncoding::Pcm => Ap2AudioCodec::Pcm,
+            AudioEncoding::Alac => Ap2AudioCodec::Alac,
+            AudioEncoding::CompressedAlac => Ap2AudioCodec::AlacCompressed,
+        },
         volume_db: volume.receiver_db(),
         quiet_mode: false,
         initial_progress: true,
@@ -304,7 +314,10 @@ async fn run_session(
             .map_err(|error| error.to_string())?;
     let stats = session.stats();
     eprintln!(
-        "AirPlay session started: target={target} volume_db={:.1}",
+        "AirPlay session started: target={target} codec={:?} latency_frames={} start_lead_ms={} volume_db={:.1}",
+        profile.encoding,
+        profile.latency_frames,
+        profile.start_lead_ms,
         volume.receiver_db()
     );
     let mut remote_commands = session.take_remote_commands();

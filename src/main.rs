@@ -4,6 +4,7 @@ use serde::Serialize;
 #[cfg(any(windows, test))]
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -85,6 +86,130 @@ struct Speaker {
     service: String,
     model: Option<String>,
     device_id: Option<String>,
+    codecs: Vec<u8>,
+    low_latency_audio: bool,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AudioEncoding {
+    Pcm,
+    Alac,
+    CompressedAlac,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StreamProfile {
+    encoding: AudioEncoding,
+    latency_frames: i32,
+    start_lead_ms: u32,
+}
+
+#[cfg(any(windows, test))]
+impl Default for StreamProfile {
+    fn default() -> Self {
+        Self {
+            encoding: AudioEncoding::Alac,
+            latency_frames: 66_150,
+            start_lead_ms: 1_000,
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+impl Speaker {
+    fn stream_profile(&self) -> StreamProfile {
+        let encoding = if self.codecs.contains(&1) {
+            AudioEncoding::CompressedAlac
+        } else if self.codecs.contains(&0) {
+            AudioEncoding::Pcm
+        } else {
+            // AirPlay-only advertisements can omit `cn`; retain the tested fallback.
+            AudioEncoding::Alac
+        };
+        if self.low_latency_audio {
+            // /info explicitly advertises a low-latency audio stream format.
+            StreamProfile {
+                encoding,
+                latency_frames: -1_764, // -40 ms at 44.1 kHz
+                start_lead_ms: 150,
+            }
+        } else {
+            StreamProfile {
+                encoding,
+                ..Default::default()
+            }
+        }
+    }
+}
+
+fn parse_codecs(value: Option<&str>) -> Vec<u8> {
+    let mut codecs: Vec<u8> = value
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|part| part.trim().parse().ok())
+        .collect();
+    codecs.sort_unstable();
+    codecs.dedup();
+    codecs
+}
+
+fn info_has_low_latency_audio(info: &plist::Value) -> bool {
+    info.as_dictionary()
+        .and_then(|info| info.get("supportedFormats"))
+        .and_then(plist::Value::as_dictionary)
+        .and_then(|formats| formats.get("lowLatencyAudioStream"))
+        .and_then(plist::Value::as_unsigned_integer)
+        .is_some_and(|formats| formats != 0)
+}
+
+fn probe_low_latency_audio(address: IpAddr, port: u16) -> bool {
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(
+        &SocketAddr::new(address, port),
+        Duration::from_millis(400),
+    ) else {
+        return false;
+    };
+    let timeout = Some(Duration::from_millis(400));
+    if stream.set_read_timeout(timeout).is_err() || stream.set_write_timeout(timeout).is_err() {
+        return false;
+    }
+    if stream
+        .write_all(b"GET /info RTSP/1.0\r\nCSeq: 1\r\nContent-Length: 0\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    let mut reader = BufReader::new(stream);
+    let mut status = String::new();
+    if reader.read_line(&mut status).is_err() || !status.starts_with("RTSP/1.0 200 ") {
+        return false;
+    }
+    let mut body_len = None;
+    for _ in 0..64 {
+        let mut line = String::new();
+        if !matches!(reader.read_line(&mut line), Ok(1..=8192)) {
+            return false;
+        }
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                body_len = value.trim().parse::<usize>().ok();
+            }
+        }
+    }
+    let Some(body_len) = body_len.filter(|length| *length <= 64 * 1024) else {
+        return false;
+    };
+    let mut body = vec![0; body_len];
+    if reader.read_exact(&mut body).is_err() {
+        return false;
+    }
+    plist::Value::from_reader(std::io::Cursor::new(body))
+        .is_ok_and(|info| info_has_low_latency_audio(&info))
 }
 
 fn instance_name(fullname: &str, service: &str) -> String {
@@ -112,6 +237,7 @@ fn discover(seconds: u64) -> Result<Vec<Speaker>, String> {
                 let name = instance_name(info.get_fullname(), service);
                 let model = info.get_property_val_str("model").map(str::to_owned);
                 let device_id = info.get_property_val_str("deviceid").map(str::to_owned);
+                let codecs = parse_codecs(info.get_property_val_str("cn"));
                 for &address in info.get_addresses() {
                     if !address.is_ipv4() {
                         continue;
@@ -123,6 +249,8 @@ fn discover(seconds: u64) -> Result<Vec<Speaker>, String> {
                         service: service.to_string(),
                         model: model.clone(),
                         device_id: device_id.clone(),
+                        codecs: codecs.clone(),
+                        low_latency_audio: false,
                     };
                     found.insert((name.clone(), address, *service), speaker);
                 }
@@ -136,8 +264,24 @@ fn discover(seconds: u64) -> Result<Vec<Speaker>, String> {
         .filter(|speaker| speaker.service == SERVICE_TYPES[0])
         .map(|speaker| speaker.address)
         .collect();
+    let raop_codecs: BTreeMap<_, _> = speakers
+        .iter()
+        .filter(|speaker| speaker.service == SERVICE_TYPES[1])
+        .map(|speaker| (speaker.address, speaker.codecs.clone()))
+        .collect();
     Ok(speakers
         .into_iter()
+        .map(|mut speaker| {
+            if speaker.codecs.is_empty() {
+                if let Some(codecs) = raop_codecs.get(&speaker.address) {
+                    speaker.codecs = codecs.clone();
+                }
+            }
+            if speaker.service == SERVICE_TYPES[0] {
+                speaker.low_latency_audio = probe_low_latency_audio(speaker.address, speaker.port);
+            }
+            speaker
+        })
         .filter(|speaker| {
             speaker.service == SERVICE_TYPES[0] || !airplay_addresses.contains(&speaker.address)
         })
@@ -311,6 +455,7 @@ fn run_manual_stream(target: SocketAddr, endpoint: Option<String>) -> Result<(),
     let stream = airplay::StreamHandle::start(
         target,
         endpoint,
+        StreamProfile::default(),
         airplay::Volume {
             scalar: 0.5,
             muted: false,
@@ -338,6 +483,7 @@ fn run_manager() -> Result<(), String> {
         _device: SoftwareDevice,
         endpoint: String,
         target: SocketAddr,
+        profile: StreamProfile,
         stream: Option<airplay::StreamHandle>,
         remote_volume: Option<mpsc::Receiver<f32>>,
         last_volume: Option<airplay::Volume>,
@@ -380,6 +526,7 @@ fn run_manager() -> Result<(), String> {
                 let key = speaker_key(&speaker);
                 let endpoint = endpoint_name(&speaker);
                 let target = SocketAddr::new(speaker.address, speaker.port);
+                let profile = speaker.stream_profile();
                 if let Some(managed) = active.get_mut(&key) {
                     managed.missed_scans = 0;
                     if managed.target != target {
@@ -389,6 +536,7 @@ fn run_manager() -> Result<(), String> {
                         managed.remote_volume = None;
                     }
                     managed.target = target;
+                    managed.profile = profile;
                     continue;
                 }
                 match SoftwareDevice::create(&key, &endpoint) {
@@ -400,6 +548,7 @@ fn run_manager() -> Result<(), String> {
                                 _device: device,
                                 endpoint,
                                 target,
+                                profile,
                                 stream: None,
                                 remote_volume: None,
                                 last_volume: None,
@@ -466,6 +615,7 @@ fn run_manager() -> Result<(), String> {
                 managed.stream = Some(airplay::StreamHandle::start(
                     managed.target,
                     managed.endpoint.clone(),
+                    managed.profile,
                     volume,
                     gains.clone(),
                     Some(remote_volume_tx),
@@ -572,6 +722,7 @@ fn run_usbip_manager() -> Result<(), String> {
         endpoint: String,
         busid: String,
         target: SocketAddr,
+        profile: StreamProfile,
         pcm: Arc<usbip_audio::PcmQueue>,
         volume_events: mpsc::Receiver<usbip_audio::Volume>,
         slider_volume: airplay::Volume,
@@ -606,7 +757,15 @@ fn run_usbip_manager() -> Result<(), String> {
                 return;
             }
         };
+        let raop_browser = match mdns.browse(SERVICE_TYPES[1]) {
+            Ok(browser) => Some(browser),
+            Err(error) => {
+                eprintln!("RAOP codec discovery unavailable: {error}");
+                None
+            }
+        };
         let mut known: BTreeMap<String, Vec<Speaker>> = BTreeMap::new();
+        let mut known_raop: BTreeMap<String, Vec<(IpAddr, Vec<u8>)>> = BTreeMap::new();
         let mut next_report = Instant::now();
         loop {
             match browser.recv_timeout(Duration::from_millis(100)) {
@@ -625,6 +784,8 @@ fn run_usbip_manager() -> Result<(), String> {
                             service: SERVICE_TYPES[0].to_owned(),
                             model: info.get_property_val_str("model").map(str::to_owned),
                             device_id: info.get_property_val_str("deviceid").map(str::to_owned),
+                            codecs: parse_codecs(info.get_property_val_str("cn")),
+                            low_latency_audio: probe_low_latency_audio(address, info.get_port()),
                         })
                         .collect();
                     known.insert(fullname, speakers);
@@ -634,10 +795,40 @@ fn run_usbip_manager() -> Result<(), String> {
                 }
                 _ => {}
             }
+            if let Some(raop_browser) = &raop_browser {
+                match raop_browser.recv_timeout(Duration::from_millis(50)) {
+                    Ok(ServiceEvent::ServiceResolved(info)) => {
+                        let codecs = parse_codecs(info.get_property_val_str("cn"));
+                        let addresses = info
+                            .get_addresses()
+                            .iter()
+                            .copied()
+                            .filter(|address| address.is_ipv4())
+                            .map(|address| (address, codecs.clone()))
+                            .collect();
+                        known_raop.insert(info.get_fullname().to_owned(), addresses);
+                    }
+                    Ok(ServiceEvent::ServiceRemoved(_, fullname)) => {
+                        known_raop.remove(&fullname);
+                    }
+                    _ => {}
+                }
+            }
             if Instant::now() >= next_report {
+                let raop_codecs: BTreeMap<IpAddr, Vec<u8>> =
+                    known_raop.values().flatten().cloned().collect();
                 let reachable: Vec<Speaker> = known
                     .values()
                     .flatten()
+                    .map(|speaker| {
+                        let mut speaker = speaker.clone();
+                        if speaker.codecs.is_empty() {
+                            if let Some(codecs) = raop_codecs.get(&speaker.address) {
+                                speaker.codecs = codecs.clone();
+                            }
+                        }
+                        speaker
+                    })
                     .filter(|speaker| {
                         std::net::TcpStream::connect_timeout(
                             &SocketAddr::new(speaker.address, speaker.port),
@@ -645,7 +836,6 @@ fn run_usbip_manager() -> Result<(), String> {
                         )
                         .is_ok()
                     })
-                    .cloned()
                     .collect();
                 if discovery_tx.send(reachable).is_err() {
                     break;
@@ -665,6 +855,7 @@ fn run_usbip_manager() -> Result<(), String> {
             for speaker in speakers {
                 let key = speaker_key(&speaker);
                 let target = SocketAddr::new(speaker.address, speaker.port);
+                let profile = speaker.stream_profile();
                 if let Some(managed) = active.get_mut(&key) {
                     managed.missed_scans = 0;
                     if managed.target != target {
@@ -674,6 +865,7 @@ fn run_usbip_manager() -> Result<(), String> {
                         managed.remote_volume = None;
                         managed.target = target;
                     }
+                    managed.profile = profile;
                     continue;
                 }
                 let endpoint = endpoint_name(&speaker);
@@ -692,6 +884,7 @@ fn run_usbip_manager() -> Result<(), String> {
                         endpoint,
                         busid: streams.busid,
                         target,
+                        profile,
                         pcm: streams.pcm,
                         volume_events: streams.volume,
                         slider_volume: airplay::Volume {
@@ -800,6 +993,7 @@ fn run_usbip_manager() -> Result<(), String> {
                 managed.stream = Some(airplay::StreamHandle::start_usbip(
                     managed.target,
                     managed.pcm.clone(),
+                    managed.profile,
                     managed.slider_volume,
                     managed.channel_gains.to_vec(),
                     Some(remote_tx),
@@ -867,11 +1061,63 @@ mod tests {
             service: SERVICE_TYPES[0].into(),
             model: None,
             device_id: Some("AA:BB:CC:DD:EE:FF".into()),
+            codecs: vec![0, 1],
+            low_latency_audio: false,
         };
         let key = speaker_key(&speaker);
         speaker.address = "192.0.2.2".parse().unwrap();
         speaker.device_id = Some("aa:bb:cc:dd:ee:ff".into());
         assert_eq!(speaker_key(&speaker), key);
         assert_eq!(key.len(), 32);
+    }
+
+    #[test]
+    fn mdns_codec_list_selects_capabilities_independent_of_model() {
+        let mut speaker = Speaker {
+            name: "Any speaker".into(),
+            address: "192.0.2.1".parse().unwrap(),
+            port: 7000,
+            service: SERVICE_TYPES[0].into(),
+            model: None,
+            device_id: None,
+            codecs: parse_codecs(Some("0,1,2,3")),
+            low_latency_audio: true,
+        };
+        assert_eq!(
+            speaker.stream_profile().encoding,
+            AudioEncoding::CompressedAlac
+        );
+        assert_eq!(speaker.stream_profile().latency_frames, -1_764);
+        assert_eq!(speaker.stream_profile().start_lead_ms, 150);
+        speaker.codecs = vec![0];
+        assert_eq!(speaker.stream_profile().encoding, AudioEncoding::Pcm);
+        speaker.low_latency_audio = false;
+        speaker.model = Some("Unrelated model".into());
+        speaker.codecs = vec![0, 1];
+        assert_eq!(
+            speaker.stream_profile().encoding,
+            AudioEncoding::CompressedAlac
+        );
+        assert_eq!(speaker.stream_profile().latency_frames, 66_150);
+        speaker.model = Some("Another model".into());
+        speaker.codecs.clear();
+        assert_eq!(speaker.stream_profile(), StreamProfile::default());
+        assert_eq!(parse_codecs(Some("1,0,1,broken")), vec![0, 1]);
+    }
+
+    #[test]
+    fn low_latency_requires_explicit_info_support() {
+        let mut formats = plist::Dictionary::new();
+        formats.insert(
+            "lowLatencyAudioStream".into(),
+            plist::Value::Integer(1.into()),
+        );
+        let mut info = plist::Dictionary::new();
+        info.insert("supportedFormats".into(), plist::Value::Dictionary(formats));
+        let info = plist::Value::Dictionary(info);
+        assert!(info_has_low_latency_audio(&info));
+        assert!(!info_has_low_latency_audio(&plist::Value::Dictionary(
+            plist::Dictionary::new()
+        )));
     }
 }
