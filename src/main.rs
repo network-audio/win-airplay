@@ -227,16 +227,17 @@ fn run(cli: Cli) -> Result<(), String> {
             if expect_pcm {
                 let deadline = Instant::now() + Duration::from_secs(seconds);
                 let mut received = 0;
-                while Instant::now() < deadline && received == 0 {
+                let mut nonzero = 0;
+                while Instant::now() < deadline {
                     if let Some(packet) = streams.pcm.pop_timeout(Duration::from_millis(500)) {
                         received += packet.len();
+                        nonzero += packet.iter().filter(|&&byte| byte != 0).count();
                     }
                 }
-                if received == 0 {
-                    return Err("No PCM reached the virtual USB audio endpoint".into());
+                if nonzero == 0 {
+                    return Err(format!("No nonzero PCM reached the virtual USB audio endpoint ({received} bytes total)"));
                 }
-                println!("Received {received} PCM bytes through USB/IP");
-                std::thread::sleep(Duration::from_secs(5));
+                println!("Received {received} PCM bytes through USB/IP ({nonzero} nonzero bytes)");
             } else {
                 std::thread::sleep(Duration::from_secs(seconds));
             }
@@ -625,7 +626,13 @@ fn run_usbip_manager() -> Result<(), String> {
                 false
             });
         }
+        let selected_output = windows_audio::default_render_output()
+            .ok()
+            .map(|output| output.name);
         for managed in active.values_mut() {
+            let selected = selected_output
+                .as_ref()
+                .is_some_and(|name| name.contains(&managed.endpoint));
             if managed.port.is_none() && managed.last_attach.elapsed() >= Duration::from_secs(5) {
                 managed.last_attach = Instant::now();
                 match usbip_attach(server.port(), &managed.busid) {
@@ -655,14 +662,15 @@ fn run_usbip_manager() -> Result<(), String> {
                     }
                 }
             }
+            let inactive = managed
+                .pcm
+                .idle_for()
+                .is_none_or(|age| age >= Duration::from_secs(5));
             if managed
                 .stream
                 .as_ref()
                 .is_some_and(|stream| stream.is_finished())
-                || managed
-                    .pcm
-                    .idle_for()
-                    .is_some_and(|age| age >= Duration::from_secs(5))
+                || (!selected && inactive)
             {
                 if let Some(stream) = managed.stream.take() {
                     stream.stop();
@@ -671,7 +679,12 @@ fn run_usbip_manager() -> Result<(), String> {
             }
             if managed.port.is_some()
                 && managed.stream.is_none()
-                && managed.pcm.has_data()
+                && (selected
+                    || (managed.pcm.has_data()
+                        && managed
+                            .pcm
+                            .idle_for()
+                            .is_some_and(|age| age < Duration::from_secs(5))))
                 && managed.last_spawn.elapsed() >= Duration::from_secs(5)
             {
                 let (remote_tx, remote_rx) = mpsc::channel();

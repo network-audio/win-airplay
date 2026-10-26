@@ -473,6 +473,7 @@ fn control(device: &Device, setup: [u8; 8], payload: &[u8]) -> Result<Vec<u8>, i
             Ok(Vec::new())
         }
         (0x80, 8) => Ok(vec![state.configuration]),
+        (0x02, 1) if index == 1 && value == 0 => Ok(Vec::new()), // CLEAR_FEATURE(ENDPOINT_HALT)
         (0x01, 11) if index == 1 && value <= 1 => {
             state.alternate = value as u8;
             Ok(Vec::new())
