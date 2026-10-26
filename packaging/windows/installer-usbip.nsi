@@ -44,7 +44,7 @@ Section "Win AirPlay USB/IP" Main
   File "${DIST_DIR}\USBIP-LICENSE.txt"
   File "${DIST_DIR}\USBip-0.9.8.1-x64.exe"
 
-  nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\install-usbip.ps1" -Action Install'
+  nsExec::ExecToLog '"$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\install-usbip.ps1" -Action Install'
   Pop $0
   ${If} $0 != 0
     MessageBox MB_ICONSTOP "USB/IP installation or startup failed." /SD IDOK
@@ -57,7 +57,7 @@ Section "Win AirPlay USB/IP" Main
 SectionEnd
 
 Section "Uninstall"
-  nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\install-usbip.ps1" -Action Uninstall'
+  nsExec::ExecToLog '"$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\install-usbip.ps1" -Action Uninstall'
   Pop $0
   Delete "$INSTDIR\win-airplay.exe"
   Delete "$INSTDIR\install-usbip.ps1"

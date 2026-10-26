@@ -22,7 +22,12 @@ $usbip = Find-UsbipExecutable
 if (-not $usbip) {
     $upstream = Join-Path $folder 'USBip-0.9.8.1-x64.exe'
     $expected = '38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a'
-    $actual = (Get-FileHash -Algorithm SHA256 $upstream).Hash.ToLowerInvariant()
+    $stream = [System.IO.File]::OpenRead($upstream)
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try { $actual = ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }
+        finally { $sha256.Dispose() }
+    } finally { $stream.Dispose() }
     if ($actual -ne $expected) { throw 'The bundled USBip installer checksum does not match.' }
     $programFiles64 = if ($env:ProgramW6432) { $env:ProgramW6432 } else { ${env:ProgramFiles} }
     $installDir = Join-Path $programFiles64 'USBip'
