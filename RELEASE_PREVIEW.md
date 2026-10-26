@@ -6,4 +6,6 @@ The controller discovers reachable speakers, presents each as a virtual USB audi
 
 This preview timestamps every controller log line and ignores an abrupt receiver-reported zero volume while the Windows slider is still well above zero. Receiver volume changes update the Windows slider without being sent back to the same speaker. Please check whether The Frame stays audible after its zero-volume events.
 
+For receivers advertising low-latency audio, the sender now transmits the first timing and audio packets 100 ms ahead of playout. This gives the receiver startup buffering without increasing the requested playback latency. Please report any crackle in the first few seconds after selecting an output.
+
 Windows CI has tested two simultaneous outputs, PCM input, endpoint volume and mute controls, and removal after detach. Audible playback to an AirPlay receiver and live disconnect behavior still need testing on a Windows machine. Please report the speaker model, Windows version, installation result, and controller log when testing.

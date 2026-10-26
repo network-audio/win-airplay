@@ -118,6 +118,19 @@ impl Default for StreamProfile {
 }
 
 #[cfg(any(windows, test))]
+impl StreamProfile {
+    fn prefill_ms(self) -> u32 {
+        // Low-latency receivers need packets and the first sync before their
+        // playout time. This changes network lead, not playback latency.
+        if self.latency_frames < 0 {
+            100
+        } else {
+            0
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
 impl Speaker {
     fn stream_profile(&self) -> StreamProfile {
         let encoding = if self.codecs.contains(&1) {
@@ -1139,6 +1152,7 @@ mod tests {
         );
         assert_eq!(speaker.stream_profile().latency_frames, -1_764);
         assert_eq!(speaker.stream_profile().start_lead_ms, 150);
+        assert_eq!(speaker.stream_profile().prefill_ms(), 100);
         speaker.codecs = vec![0];
         assert_eq!(speaker.stream_profile().encoding, AudioEncoding::Pcm);
         speaker.low_latency_audio = false;
@@ -1149,6 +1163,7 @@ mod tests {
             AudioEncoding::CompressedAlac
         );
         assert_eq!(speaker.stream_profile().latency_frames, 66_150);
+        assert_eq!(speaker.stream_profile().prefill_ms(), 0);
         speaker.model = Some("Another model".into());
         speaker.codecs.clear();
         assert_eq!(speaker.stream_profile(), StreamProfile::default());

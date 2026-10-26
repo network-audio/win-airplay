@@ -303,6 +303,7 @@ async fn run_session(
         target,
         latency_frames: profile.latency_frames,
         start_lead_ms: profile.start_lead_ms,
+        prefill_ms: profile.prefill_ms(),
         codec: match profile.encoding {
             AudioEncoding::Pcm => Ap2AudioCodec::Pcm,
             AudioEncoding::Alac => Ap2AudioCodec::Alac,
@@ -319,11 +320,20 @@ async fn run_session(
             .await
             .map_err(|error| error.to_string())?;
     let stats = session.stats();
+    let startup_lead_ms = {
+        let now = std::time::Instant::now();
+        if session.start_instant() >= now {
+            session.start_instant().duration_since(now).as_millis() as i64
+        } else {
+            -(now.duration_since(session.start_instant()).as_millis() as i64)
+        }
+    };
     eprintln!(
-        "AirPlay session started: target={target} codec={:?} latency_frames={} start_lead_ms={} volume_db={:.1}",
+        "AirPlay session started: target={target} codec={:?} latency_frames={} start_lead_ms={} prefill_ms={} startup_lead_remaining_ms={startup_lead_ms} volume_db={:.1}",
         profile.encoding,
         profile.latency_frames,
         profile.start_lead_ms,
+        profile.prefill_ms(),
         volume.receiver_db()
     );
     let mut remote_commands = session.take_remote_commands();
