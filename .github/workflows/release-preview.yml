@@ -1,0 +1,50 @@
+name: Publish development preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: Successful Build and test run ID from main
+        required: true
+        type: string
+      tag:
+        description: Preview tag, for example v0.1.0-alpha.1
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify and download installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]
+          state=$(gh run view "$BUILD_RUN_ID" --json conclusion,headBranch,headSha --jq '[.conclusion,.headBranch,.headSha]|@tsv')
+          IFS=$'\t' read -r conclusion branch sha <<< "$state"
+          [[ "$conclusion" == success && "$branch" == main ]]
+          printf '%s\n' "$sha" > build-sha.txt
+          mkdir installer
+          gh run download "$BUILD_RUN_ID" --name win-airplay-installer-test-preview --dir installer
+          test "$(find installer -maxdepth 1 -name '*-test-preview.exe' | wc -l)" -eq 1
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha=$(cat build-sha.txt)
+          gh release create "$TAG" installer/*-test-preview.exe \
+            --target "$sha" --prerelease --title "Win AirPlay $TAG development preview" \
+            --notes-file RELEASE_PREVIEW.md
