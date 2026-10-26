@@ -1,4 +1,4 @@
-name: Publish development preview
+name: Publish release
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       tag:
-        description: Preview tag, for example v0.1.0-alpha.1
+        description: Release tag, for example v1.0.0
         required: true
         type: string
 
@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Verify and download installer
+      - name: Verify build and download installers
         env:
           GH_TOKEN: ${{ github.token }}
           BUILD_RUN_ID: ${{ inputs.build_run_id }}
@@ -29,22 +29,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          version=$(sed -n 's/^version = "\([0-9]*\.[0-9]*\.[0-9]*\)"/\1/p' Cargo.toml | head -1)
+          [[ "$TAG" == "v$version" ]]
           state=$(gh run view "$BUILD_RUN_ID" --json conclusion,headBranch,headSha --jq '[.conclusion,.headBranch,.headSha]|@tsv')
           IFS=$'\t' read -r conclusion branch sha <<< "$state"
-          [[ "$conclusion" == success && "$branch" == main ]]
-          printf '%s\n' "$sha" > build-sha.txt
+          [[ "$conclusion" == success && "$branch" == main && "$sha" == "$GITHUB_SHA" ]]
           mkdir installer
-          gh run download "$BUILD_RUN_ID" --name win-airplay-installer-usbip-preview --dir installer
-          test -f installer/win-airplay-usbip-windows-x64-preview.exe
-      - name: Publish prerelease
+          gh run download "$BUILD_RUN_ID" --name win-airplay-installer-x64 --dir installer
+          gh run download "$BUILD_RUN_ID" --name win-airplay-installer-arm64 --dir installer
+          test -f installer/win-airplay-windows-x64-setup.exe
+          test -f installer/win-airplay-windows-arm64-setup.exe
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
-          sha=$(cat build-sha.txt)
-          gh release create "$TAG" installer/win-airplay-usbip-windows-x64-preview.exe \
-            --target "$sha" --prerelease --title "Win AirPlay $TAG development preview" \
-            --notes-file RELEASE_PREVIEW.md
+          gh release create "$TAG" installer/win-airplay-windows-*-setup.exe \
+            --target "$GITHUB_SHA" --title "Win AirPlay $TAG" \
+            --notes-file RELEASE.md

@@ -20,8 +20,13 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 
 $usbip = Find-UsbipExecutable
 if (-not $usbip) {
-    $upstream = Join-Path $folder 'USBip-0.9.8.1-x64.exe'
-    $expected = '38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a'
+    $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+    if ($arch -notin @('x64', 'arm64')) { throw "Unsupported Windows architecture: $arch" }
+    $upstream = Join-Path $folder "USBip-0.9.8.1-$arch.exe"
+    $expected = switch ($arch) {
+        'x64' { '38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a' }
+        'arm64' { 'cab7ff97f79275eeb5c5b8bb2eb3111ff6b6c4eead07d9bec9be5bd1e3a35800' }
+    }
     $stream = [System.IO.File]::OpenRead($upstream)
     try {
         $sha256 = [System.Security.Cryptography.SHA256]::Create()

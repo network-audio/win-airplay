@@ -8,13 +8,18 @@ SetCompressor /SOLID lzma
   !error "Pass -DDIST_DIR=<staging directory>"
 !endif
 !ifndef OUT_FILE
-  !define OUT_FILE "win-airplay-usbip-windows-x64-setup.exe"
+  !define OUT_FILE "win-airplay-usbip-windows-setup.exe"
+!endif
+!ifndef USBIP_ARCH
+  !error "Pass -DUSBIP_ARCH=x64 or arm64"
 !endif
 
-Name "Win AirPlay USB/IP Preview"
+Name "Win AirPlay USB/IP"
 OutFile "${OUT_FILE}"
 InstallDir "$PROGRAMFILES64\Win AirPlay USBIP"
 RequestExecutionLevel admin
+VIProductVersion "1.0.0.0"
+VIAddVersionKey "ProductVersion" "1.0.0"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
@@ -42,7 +47,7 @@ Section "Win AirPlay USB/IP" Main
   File "${DIST_DIR}\test-tone.wav"
   File "${DIST_DIR}\NYX-LICENSE.txt"
   File "${DIST_DIR}\USBIP-LICENSE.txt"
-  File "${DIST_DIR}\USBip-0.9.8.1-x64.exe"
+  File "${DIST_DIR}\USBip-0.9.8.1-${USBIP_ARCH}.exe"
 
   nsExec::ExecToLog '"$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\install-usbip.ps1" -Action Install'
   Pop $0
@@ -52,7 +57,8 @@ Section "Win AirPlay USB/IP" Main
   ${EndIf}
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\WinAirPlayUSBIP" "DisplayName" "Win AirPlay USB/IP Preview"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\WinAirPlayUSBIP" "DisplayName" "Win AirPlay USB/IP"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\WinAirPlayUSBIP" "DisplayVersion" "1.0.0"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\WinAirPlayUSBIP" "UninstallString" '"$INSTDIR\Uninstall.exe"'
 SectionEnd
 
@@ -69,7 +75,7 @@ Section "Uninstall"
   Delete "$INSTDIR\test-tone.wav"
   Delete "$INSTDIR\NYX-LICENSE.txt"
   Delete "$INSTDIR\USBIP-LICENSE.txt"
-  Delete "$INSTDIR\USBip-0.9.8.1-x64.exe"
+  Delete "$INSTDIR\USBip-0.9.8.1-${USBIP_ARCH}.exe"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\WinAirPlayUSBIP"

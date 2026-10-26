@@ -10,7 +10,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-2025]
+        include:
+          - { os: ubuntu-latest, arch: linux }
+          - { os: windows-2025, arch: x64 }
+          - { os: windows-11-arm, arch: arm64 }
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,28 +50,32 @@ jobs:
       - if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: win-airplay-controller-x64
+          name: win-airplay-controller-${{ matrix.arch }}
           path: target/release/win-airplay.exe
 
-  installer-preview:
+  installer:
     needs: rust
     runs-on: windows-2025
     timeout-minutes: 15
+    strategy:
+      matrix:
+        arch: [x64, arm64]
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
       - uses: actions/download-artifact@v4
         with:
-          name: win-airplay-controller-x64
+          name: win-airplay-controller-${{ matrix.arch }}
           path: staging
       - name: Stage pinned upstream USBip and compile installer
         shell: pwsh
         run: |
-          $url = 'https://github.com/vadimgrn/usbip-win2/releases/download/v.0.9.8.1/USBip-0.9.8.1-x64.exe'
-          $upstream = 'staging/USBip-0.9.8.1-x64.exe'
+          $arch = '${{ matrix.arch }}'
+          $url = "https://github.com/vadimgrn/usbip-win2/releases/download/v.0.9.8.1/USBip-0.9.8.1-$arch.exe"
+          $upstream = "staging/USBip-0.9.8.1-$arch.exe"
           Invoke-WebRequest -Uri $url -OutFile $upstream
-          $expected = '38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a'
+          $expected = if ($arch -eq 'x64') { '38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a' } else { 'cab7ff97f79275eeb5c5b8bb2eb3111ff6b6c4eead07d9bec9be5bd1e3a35800' }
           $actual = (Get-FileHash -Algorithm SHA256 $upstream).Hash.ToLowerInvariant()
           if ($actual -ne $expected) { throw "USBip release checksum mismatch: $actual" }
           Copy-Item vendor/nyx-refrain/LICENSE staging/NYX-LICENSE.txt
@@ -85,12 +92,13 @@ jobs:
           }
           $nsis = (Get-Command makensis.exe -ErrorAction SilentlyContinue).Source
           if (-not $nsis) { $nsis = 'C:\Program Files (x86)\NSIS\makensis.exe' }
-          & $nsis "/DDIST_DIR=$((Resolve-Path staging).Path)" '/DOUT_FILE=win-airplay-usbip-windows-x64-preview.exe' packaging/windows/installer-usbip.nsi
+          & $nsis "/DDIST_DIR=$((Resolve-Path staging).Path)" "/DUSBIP_ARCH=$arch" "/DOUT_FILE=win-airplay-windows-$arch-setup.exe" packaging/windows/installer-usbip.nsi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Install bundled preview and verify USBip path
+      - if: matrix.arch == 'x64'
+        name: Install bundled package and verify USBip path
         shell: pwsh
         run: |
-          $setup = (Resolve-Path packaging/windows/win-airplay-usbip-windows-x64-preview.exe).Path
+          $setup = (Resolve-Path packaging/windows/win-airplay-windows-x64-setup.exe).Path
           $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
           $principal = [Security.Principal.WindowsPrincipal]::new($identity)
           Write-Host "Runner token has administrator permission: $($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))"
@@ -118,34 +126,73 @@ jobs:
           Write-Host "Bundled installer found USBip at $usbip"
       - uses: actions/upload-artifact@v4
         with:
-          name: win-airplay-installer-usbip-preview
-          path: packaging/windows/win-airplay-usbip-windows-x64-preview.exe
+          name: win-airplay-installer-${{ matrix.arch }}
+          path: packaging/windows/win-airplay-windows-${{ matrix.arch }}-setup.exe
           if-no-files-found: error
+
+  installer-arm64-smoke:
+    needs: installer
+    runs-on: windows-11-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: win-airplay-installer-arm64
+          path: installer
+      - name: Install bundled ARM64 package and verify USBip path
+        shell: pwsh
+        run: |
+          $setup = (Resolve-Path installer/win-airplay-windows-arm64-setup.exe).Path
+          $result = Start-Process -FilePath $setup -ArgumentList '/S' -PassThru
+          if (-not $result.WaitForExit(180000)) {
+            Stop-Process -Id $result.Id -Force -ErrorAction SilentlyContinue
+            throw 'Silent ARM64 installer did not exit within three minutes'
+          }
+          if ($result.ExitCode -ne 0) {
+            $setupLog = Join-Path $env:TEMP 'win-airplay-usbip-setup.log'
+            if (Test-Path $setupLog) { Get-Content $setupLog -Tail 80 }
+            throw "ARM64 installer exited with $($result.ExitCode)"
+          }
+          $folder = Join-Path ${env:ProgramFiles} 'Win AirPlay USBIP'
+          $pathFile = Join-Path $folder 'usbip-path.txt'
+          if (-not (Test-Path $pathFile)) { throw 'Installer did not save the USBip executable path' }
+          $usbip = [System.IO.File]::ReadAllText($pathFile).Trim()
+          if (-not (Test-Path -LiteralPath $usbip -PathType Leaf)) { throw "USBip executable is missing: $usbip" }
+          $task = Get-ScheduledTask -TaskName 'Win AirPlay USBIP'
+          if ($task.Actions.Arguments -notmatch '-WindowStyle Hidden') { throw 'Controller task is not hidden' }
+          Write-Host "Bundled ARM64 installer found USBip at $usbip"
 
   usbip-windows-smoke:
     if: github.ref_name == 'main' || github.ref_name == 'codex/usbip-win2-investigation'
     needs: rust
-    runs-on: windows-2025
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 25
+    strategy:
+      matrix:
+        include:
+          - { os: windows-2025, arch: x64 }
+          - { os: windows-11-arm, arch: arm64 }
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
       - uses: actions/download-artifact@v4
         with:
-          name: win-airplay-controller-x64
+          name: win-airplay-controller-${{ matrix.arch }}
           path: probe
       - name: Install USBip and check virtual speaker enumeration
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $url = 'https://github.com/vadimgrn/usbip-win2/releases/download/v.0.9.8.1/USBip-0.9.8.1-x64.exe'
-          Invoke-WebRequest -Uri $url -OutFile USBip-0.9.8.1-x64.exe
-          $expected = '38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a'
-          $actual = (Get-FileHash -Algorithm SHA256 USBip-0.9.8.1-x64.exe).Hash.ToLowerInvariant()
+          $arch = '${{ matrix.arch }}'
+          $url = "https://github.com/vadimgrn/usbip-win2/releases/download/v.0.9.8.1/USBip-0.9.8.1-$arch.exe"
+          $upstream = "USBip-0.9.8.1-$arch.exe"
+          Invoke-WebRequest -Uri $url -OutFile $upstream
+          $expected = if ($arch -eq 'x64') { '38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a' } else { 'cab7ff97f79275eeb5c5b8bb2eb3111ff6b6c4eead07d9bec9be5bd1e3a35800' }
+          $actual = (Get-FileHash -Algorithm SHA256 $upstream).Hash.ToLowerInvariant()
           if ($actual -ne $expected) { throw 'USBip release checksum mismatch' }
           $customDir = Join-Path $env:RUNNER_TEMP 'USBip custom location'
-          $installer = Start-Process -FilePath .\USBip-0.9.8.1-x64.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/COMPONENTS=main,client',"/DIR=`"$customDir`"" -Wait -PassThru
+          $installer = Start-Process -FilePath ".\$upstream" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/COMPONENTS=main,client',"/DIR=`"$customDir`"" -Wait -PassThru
           if ($installer.ExitCode -notin @(0, 3010)) { throw "USBip installer returned $($installer.ExitCode)" }
           . ./packaging/windows/find-usbip.ps1
           $usbip = Find-UsbipExecutable
