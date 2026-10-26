@@ -2,14 +2,29 @@ param([ValidateSet('Install', 'Uninstall')][string]$Action)
 
 $ErrorActionPreference = 'Stop'
 $taskName = 'Win AirPlay'
+$folder = Split-Path -Parent $MyInvocation.MyCommand.Path
+$driverFolder = Join-Path $folder 'driver'
 
 if ($Action -eq 'Uninstall') {
     Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    $publishedFile = Join-Path $driverFolder 'published-name.txt'
+    if (Test-Path $publishedFile) {
+        $published = (Get-Content $publishedFile -Raw).Trim()
+        if ($published -match '^oem\d+\.inf$') {
+            & pnputil.exe /delete-driver $published /uninstall /force | Out-Null
+        }
+    }
+    $certificate = Join-Path $driverFolder 'WinAirPlayTest.cer'
+    if (Test-Path $certificate) {
+        $thumbprint = (Get-PfxCertificate -FilePath $certificate).Thumbprint
+        Remove-Item "Cert:\LocalMachine\Root\$thumbprint" -ErrorAction SilentlyContinue
+        Remove-Item "Cert:\LocalMachine\TrustedPublisher\$thumbprint" -ErrorAction SilentlyContinue
+    }
     exit 0
 }
 
-$folder = Split-Path -Parent $MyInvocation.MyCommand.Path
 $driver = Join-Path $folder 'driver\ComponentizedAudioSample.inf'
 $launcher = Join-Path $folder 'run.ps1'
 
@@ -29,6 +44,10 @@ Import-Certificate -FilePath $certificate -CertStoreLocation Cert:\LocalMachine\
 $output = & pnputil.exe /add-driver $driver /install 2>&1
 if ($LASTEXITCODE -ne 0) {
     throw "Driver installation failed: $($output -join [Environment]::NewLine)"
+}
+$published = [regex]::Matches(($output -join "`n"), 'oem\d+\.inf', 'IgnoreCase') | Select-Object -Last 1
+if ($published) {
+    $published.Value | Set-Content (Join-Path $driverFolder 'published-name.txt')
 }
 
 $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name

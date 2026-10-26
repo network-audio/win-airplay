@@ -63,11 +63,10 @@ jobs:
         shell: pwsh
         run: |
           Copy-Item driver-package test-driver-package -Recurse
-          $roots = @('.\packages', "${env:ProgramFiles(x86)}\Windows Kits\10\bin", "$env:ProgramFiles\Windows Kits\10\bin") | Where-Object { Test-Path $_ }
-          $kitTools = Get-ChildItem $roots -Recurse -File | Where-Object { $_.Name -in @('inf2cat.exe', 'signtool.exe') }
-          $inf2cat = $kitTools | Where-Object Name -eq 'inf2cat.exe' | Select-Object -First 1
-          $signtool = $kitTools | Where-Object { $_.Name -eq 'signtool.exe' -and $_.FullName -match '\\x64\\' } | Select-Object -First 1
-          if (-not $inf2cat -or -not $signtool) { throw "Inf2Cat or SignTool missing. Found: $($kitTools.FullName -join ', ')" }
+          $kitBin = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+          $inf2cat = Get-ChildItem "$kitBin\*\x86\inf2cat.exe", "$kitBin\*\x64\inf2cat.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
+          $signtool = Get-ChildItem "$kitBin\*\x64\signtool.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $inf2cat -or -not $signtool) { throw "Inf2Cat or SignTool missing from $kitBin" }
           $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Win AirPlay Development Test' -CertStoreLocation Cert:\CurrentUser\My -HashAlgorithm SHA256
           Export-Certificate -Cert $cert -FilePath test-driver-package/WinAirPlayTest.cer | Out-Null
           Import-Certificate -FilePath test-driver-package/WinAirPlayTest.cer -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
