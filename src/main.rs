@@ -490,7 +490,7 @@ fn run_manager() -> Result<(), String> {
                 if let Some(remote) = &managed.remote_volume {
                     while let Ok(scalar) = remote.try_recv() {
                         if let Err(error) =
-                            windows_audio::set_default_volume_if_name(&managed.endpoint, scalar)
+                            windows_audio::set_render_volume(&managed.endpoint, scalar)
                         {
                             eprintln!("Could not mirror speaker volume to Windows: {error}");
                         } else {
@@ -575,6 +575,7 @@ fn run_usbip_manager() -> Result<(), String> {
         pcm: Arc<usbip_audio::PcmQueue>,
         volume_events: mpsc::Receiver<usbip_audio::Volume>,
         slider_volume: airplay::Volume,
+        channel_gains: [f32; 2],
         stream: Option<airplay::StreamHandle>,
         remote_volume: Option<mpsc::Receiver<f32>>,
         port: Option<u32>,
@@ -697,6 +698,7 @@ fn run_usbip_manager() -> Result<(), String> {
                             scalar: 1.0,
                             muted: false,
                         },
+                        channel_gains: [1.0, 1.0],
                         stream: None,
                         remote_volume: None,
                         port,
@@ -733,6 +735,7 @@ fn run_usbip_manager() -> Result<(), String> {
             let mut volume_changed = false;
             while let Ok(volume) = managed.volume_events.try_recv() {
                 volume_changed = true;
+                managed.channel_gains = volume.channels;
                 if let Some(stream) = &managed.stream {
                     stream.set_channel_gains(volume.channels.to_vec());
                 }
@@ -796,7 +799,7 @@ fn run_usbip_manager() -> Result<(), String> {
                     managed.target,
                     managed.pcm.clone(),
                     managed.slider_volume,
-                    managed.volume.channels.to_vec(),
+                    managed.channel_gains.to_vec(),
                     Some(remote_tx),
                 ));
                 managed.remote_volume = Some(remote_rx);
