@@ -15,11 +15,16 @@ Abstract:
 #pragma warning (disable : 4127)
 
 #include <initguid.h>
+#include <devpkey.h>
 #include <sysvad.h>
 #include "hw.h"
 #include "savedata.h"
 #include "IHVPrivatePropertySet.h"
 #include "simple.h"
+
+// Set by the Rust software-device enumerator for each AirPlay receiver.
+DEFINE_DEVPROPKEY(DEVPKEY_WinAirPlay_SpeakerName,
+    0x42dbc20a, 0x8d71, 0x4bec, 0xb3, 0x37, 0xe0, 0x40, 0xb5, 0x29, 0xb1, 0x63, 2);
 
 #ifdef SYSVAD_BTH_BYPASS
 #include <limits.h>
@@ -1655,6 +1660,10 @@ Create the audio interface (in disabled mode).
 
     NTSTATUS        ntStatus;
     UNICODE_STRING  referenceString;
+    WCHAR           speakerName[256] = {};
+    ULONG           requiredSize = 0;
+    DEVPROPTYPE     propertyType = DEVPROP_TYPE_EMPTY;
+    NTSTATUS        nameStatus;
 
     RtlInitUnicodeString(&referenceString, ReferenceString);
 
@@ -1700,6 +1709,26 @@ Create the audio interface (in disabled mode).
         ntStatus,
         DPF(D_ERROR, ("CreateAudioInterfaceWithProperties: SysvadIoSetDeviceInterfacePropertyDataMultiple(...): failed, 0x%x", ntStatus)),
         Done);
+
+    // A separate software PnP instance backs each receiver. Copy its name to
+    // this instance's KS interface before AudioEndpointBuilder sees it.
+    nameStatus = IoGetDevicePropertyData(
+        GetPhysicalDeviceObject(), &DEVPKEY_WinAirPlay_SpeakerName,
+        LOCALE_NEUTRAL, 0, sizeof(speakerName), speakerName,
+        &requiredSize, &propertyType);
+    if (NT_SUCCESS(nameStatus) && propertyType == DEVPROP_TYPE_STRING &&
+        requiredSize >= sizeof(WCHAR) && requiredSize <= sizeof(speakerName) &&
+        speakerName[(requiredSize / sizeof(WCHAR)) - 1] == L'\0')
+    {
+        ntStatus = IoSetDeviceInterfacePropertyData(
+            AudioSymbolicLinkName, &DEVPKEY_DeviceInterface_FriendlyName,
+            LOCALE_NEUTRAL, PLUGPLAY_PROPERTY_PERSISTENT,
+            DEVPROP_TYPE_STRING, requiredSize, speakerName);
+        IF_FAILED_ACTION_JUMP(
+            ntStatus,
+            DPF(D_ERROR, ("CreateAudioInterfaceWithProperties: setting speaker name failed, 0x%x", ntStatus)),
+            Done);
+    }
 
     //
     // All done.

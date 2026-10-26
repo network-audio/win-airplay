@@ -1,12 +1,17 @@
 use clap::{Parser, Subcommand};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use serde::Serialize;
+#[cfg(any(windows, test))]
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
 
 const SERVICE_TYPES: [&str; 2] = ["_airplay._tcp.local.", "_raop._tcp.local."];
+
+#[cfg(windows)]
+mod windows_device;
 
 #[derive(Parser)]
 #[command(version, about = "Discover AirPlay speakers and send Windows audio")]
@@ -42,6 +47,11 @@ enum Action {
         #[arg(long, default_value_t = 3)]
         duration: u32,
     },
+    /// Keep one Windows output endpoint and sender for each discovered AirPlay device.
+    Run {
+        #[arg(long, default_value = "nyxr")]
+        sender: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -51,6 +61,7 @@ struct Speaker {
     port: u16,
     service: String,
     model: Option<String>,
+    device_id: Option<String>,
 }
 
 fn instance_name(fullname: &str, service: &str) -> String {
@@ -77,6 +88,7 @@ fn discover(seconds: u64) -> Result<Vec<Speaker>, String> {
             {
                 let name = instance_name(info.get_fullname(), service);
                 let model = info.get_property_val_str("model").map(str::to_owned);
+                let device_id = info.get_property_val_str("deviceid").map(str::to_owned);
                 for &address in info.get_addresses() {
                     if !address.is_ipv4() {
                         continue;
@@ -87,6 +99,7 @@ fn discover(seconds: u64) -> Result<Vec<Speaker>, String> {
                         port: info.get_port(),
                         service: service.to_string(),
                         model: model.clone(),
+                        device_id: device_id.clone(),
                     };
                     found.insert((name.clone(), address, *service), speaker);
                 }
@@ -106,6 +119,25 @@ fn discover(seconds: u64) -> Result<Vec<Speaker>, String> {
             speaker.service == SERVICE_TYPES[0] || !airplay_addresses.contains(&speaker.address)
         })
         .collect())
+}
+
+#[cfg(any(windows, test))]
+fn speaker_key(speaker: &Speaker) -> String {
+    let identity = speaker
+        .device_id
+        .clone()
+        .unwrap_or_else(|| format!("{}@{}", speaker.name, speaker.address));
+    let digest = Sha256::digest(identity.as_bytes());
+    digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[cfg(windows)]
+fn endpoint_name(speaker: &Speaker) -> String {
+    let name: String = speaker.name.chars().take(180).collect();
+    format!("AirPlay {name}")
 }
 
 fn sender_args(
@@ -178,8 +210,99 @@ fn run(cli: Cli) -> Result<(), String> {
                 return Err(format!("{sender} exited with {status}"));
             }
         }
+        Action::Run { sender } => run_manager(sender)?,
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn run_manager(sender: String) -> Result<(), String> {
+    use std::process::Child;
+    use windows_device::SoftwareDevice;
+
+    struct Managed {
+        _device: SoftwareDevice,
+        endpoint: String,
+        target: String,
+        child: Option<Child>,
+        last_spawn: Instant,
+        missed_scans: u8,
+    }
+
+    let mut active: BTreeMap<String, Managed> = BTreeMap::new();
+    loop {
+        let speakers = discover(4)?;
+        for speaker in speakers
+            .into_iter()
+            .filter(|speaker| speaker.service == SERVICE_TYPES[0])
+        {
+            let key = speaker_key(&speaker);
+            let endpoint = endpoint_name(&speaker);
+            let target = speaker.address.to_string();
+            if let Some(managed) = active.get_mut(&key) {
+                managed.missed_scans = 0;
+                managed.target = target;
+                continue;
+            }
+            match SoftwareDevice::create(&key, &endpoint) {
+                Ok(device) => {
+                    println!("Created output {endpoint} for {}", speaker.address);
+                    active.insert(
+                        key,
+                        Managed {
+                            _device: device,
+                            endpoint,
+                            target,
+                            child: None,
+                            last_spawn: Instant::now() - Duration::from_secs(10),
+                            missed_scans: 0,
+                        },
+                    );
+                }
+                Err(error) => eprintln!("Could not create output for {}: {error}", speaker.name),
+            }
+        }
+
+        for managed in active.values_mut() {
+            managed.missed_scans = managed.missed_scans.saturating_add(1);
+            if let Some(child) = managed.child.as_mut() {
+                if child.try_wait().map_err(|e| e.to_string())?.is_some() {
+                    managed.child = None;
+                }
+            }
+            if managed.missed_scans < 3
+                && managed.child.is_none()
+                && managed.last_spawn.elapsed() >= Duration::from_secs(5)
+            {
+                let args = sender_args(&managed.target, Some(&managed.endpoint), false, 0);
+                match Command::new(&sender).args(args).spawn() {
+                    Ok(child) => {
+                        managed.child = Some(child);
+                        managed.last_spawn = Instant::now();
+                    }
+                    Err(error) => eprintln!("Could not start {sender}: {error}"),
+                }
+            }
+        }
+        active.retain(|_, managed| {
+            if managed.missed_scans < 3 {
+                true
+            } else {
+                if let Some(mut child) = managed.child.take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                println!("Removed output {}", managed.endpoint);
+                false
+            }
+        });
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+#[cfg(not(windows))]
+fn run_manager(_sender: String) -> Result<(), String> {
+    Err("dynamic audio endpoints require Windows".into())
 }
 
 fn main() -> ExitCode {
@@ -236,5 +359,21 @@ mod tests {
             instance_name("Kitchen._airplay._tcp.local.", SERVICE_TYPES[0]),
             "Kitchen"
         );
+    }
+
+    #[test]
+    fn stable_speaker_key_uses_device_id() {
+        let mut speaker = Speaker {
+            name: "Kitchen".into(),
+            address: "192.0.2.1".parse().unwrap(),
+            port: 7000,
+            service: SERVICE_TYPES[0].into(),
+            model: None,
+            device_id: Some("AA:BB:CC:DD:EE:FF".into()),
+        };
+        let key = speaker_key(&speaker);
+        speaker.address = "192.0.2.2".parse().unwrap();
+        assert_eq!(speaker_key(&speaker), key);
+        assert_eq!(key.len(), 32);
     }
 }

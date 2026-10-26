@@ -521,13 +521,10 @@ PENDPOINT_MINIPAIR  g_RenderEndpoints[] =
 static
 PENDPOINT_MINIPAIR  g_CaptureEndpoints[] = 
 {
-    &MicInMiniports,
-    &MicArray1Miniports,
-    &MicArray2Miniports,
-    &MicArray3Miniports,
+    NULL,
 };
 
-#define g_cCaptureEndpoints (SIZEOF_ARRAY(g_CaptureEndpoints))
+#define g_cCaptureEndpoints 0
 
 //=============================================================================
 //
