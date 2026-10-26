@@ -1,0 +1,7 @@
+/target/
+/packages/
+*.user
+*.log
+driver/sysvad/**/Debug/
+driver/sysvad/**/Release/
+

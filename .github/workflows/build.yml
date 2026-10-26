@@ -1,0 +1,62 @@
+name: Build and test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  rust:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-2025]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-airplay-controller-x64
+          path: target/release/win-airplay.exe
+
+  driver:
+    runs-on: windows-2025-vs2026
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - name: Restore WDK packages
+        run: nuget restore .\packages.config -PackagesDirectory .\packages\
+      - name: Build SysVAD endpoint
+        shell: pwsh
+        run: |
+          $stampInf = Get-ChildItem .\packages -Filter stampinf.exe -Recurse | Where-Object { $_.FullName -match '\\x64\\' } | Select-Object -First 1
+          if (-not $stampInf) { throw 'stampinf.exe was not found in the restored WDK packages' }
+          Write-Host "Using stampinf.exe from $($stampInf.DirectoryName)"
+          $env:PATH = "$($stampInf.DirectoryName);$env:PATH"
+          msbuild driver/sysvad/EndpointsCommon/EndpointsCommon.vcxproj /m /p:Configuration=Release /p:Platform=x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          msbuild driver/sysvad/KeywordDetectorAdapter/KeywordDetectorContosoAdapter.vcxproj /m /p:Configuration=Release /p:Platform=x64 /p:ApiValidator_Enable=false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          msbuild driver/sysvad/TabletAudioSample/TabletAudioSample.vcxproj /m /p:Configuration=Release /p:Platform=x64 /p:ApiValidator_Enable=false /p:SkipPackageVerification=true "/p:StampInfToolPath=$($stampInf.DirectoryName)"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Stage unsigned driver files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force driver-package | Out-Null
+          Copy-Item driver/sysvad/TabletAudioSample/x64/Release/TabletAudioSample.sys driver-package/
+          Copy-Item driver/sysvad/TabletAudioSample/x64/Release/ComponentizedAudioSample.inf driver-package/
+          Copy-Item driver/sysvad/KeywordDetectorAdapter/x64/Release/KeywordDetectorContosoAdapter.dll driver-package/
+          Copy-Item driver/MICROSOFT-PUBLIC-LICENSE.txt driver-package/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-airplay-driver-unsigned-x64
+          path: driver-package/**
+
