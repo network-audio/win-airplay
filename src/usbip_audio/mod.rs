@@ -427,7 +427,7 @@ fn handle_submit(
     let mut compact = Vec::with_capacity(payload.len());
     let mut actual = 0usize;
     let mut cursor = 0usize;
-    for entry in reply.chunks_exact_mut(16) {
+    for entry in reply.as_chunks_mut::<16>().0 {
         let packet_len = be32(&entry[4..8]) as usize;
         if cursor
             .checked_add(packet_len)
