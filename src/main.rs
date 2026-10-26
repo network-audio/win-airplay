@@ -123,7 +123,7 @@ impl StreamProfile {
         // Low-latency receivers need packets and the first sync before their
         // playout time. This changes network lead, not playback latency.
         if self.latency_frames < 0 {
-            200
+            100
         } else {
             0
         }
@@ -1152,7 +1152,7 @@ mod tests {
         );
         assert_eq!(speaker.stream_profile().latency_frames, -1_764);
         assert_eq!(speaker.stream_profile().start_lead_ms, 300);
-        assert_eq!(speaker.stream_profile().prefill_ms(), 200);
+        assert_eq!(speaker.stream_profile().prefill_ms(), 100);
         speaker.codecs = vec![0];
         assert_eq!(speaker.stream_profile().encoding, AudioEncoding::Pcm);
         speaker.low_latency_audio = false;
