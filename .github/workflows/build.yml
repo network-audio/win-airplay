@@ -24,6 +24,24 @@ jobs:
       - run: cargo test --locked
       - run: cargo build --release --locked
       - if: runner.os == 'Windows'
+        name: Check bounded log rotation
+        shell: pwsh
+        run: |
+          . ./packaging/windows/rotating-log.ps1
+          $directory = Join-Path $env:RUNNER_TEMP 'win-airplay-log-test'
+          New-Item -ItemType Directory -Force $directory | Out-Null
+          $log = Join-Path $directory 'controller.log'
+          for ($i = 0; $i -lt 180; $i++) {
+            Write-RotatingLog -Path $log -Message ('x' * 8192)
+          }
+          if (-not (Test-Path "$log.1")) { throw 'Log did not rotate' }
+          [System.IO.File]::WriteAllBytes($log, [byte[]]::new(2MB))
+          Write-RotatingLog -Path $log -Message ('y' * 1200000)
+          $files = @(Get-ChildItem $directory -File)
+          if ($files.Count -gt 2 -or @($files | Where-Object { $_.Length -gt 1MB }).Count -gt 0) {
+            throw 'Log rotation exceeded two files or 1 MiB per file'
+          }
+      - if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: win-airplay-controller-x64
@@ -53,6 +71,7 @@ jobs:
           Copy-Item packaging/windows/USBIP-LICENSE.txt staging/
           Copy-Item packaging/windows/install-usbip.ps1 staging/
           Copy-Item packaging/windows/run-usbip.ps1 staging/
+          Copy-Item packaging/windows/rotating-log.ps1 staging/
           Copy-Item packaging/windows/test-playback.ps1 staging/
           Copy-Item packaging/windows/assets/test-tone.wav staging/
           if (-not (Get-Command makensis.exe -ErrorAction SilentlyContinue)) {
