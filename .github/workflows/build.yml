@@ -60,3 +60,47 @@ jobs:
           name: win-airplay-driver-unsigned-x64
           path: driver-package/**
 
+  installer-preview:
+    needs: [rust, driver]
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: pStrikeZ/Nyx-Refrain
+          ref: 167d0a7e48724946b37f779e4e4a70df22e38059
+          path: nyx
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: nyx
+      - name: Build AirPlay sender
+        run: cargo build --release --locked --package nyxr --manifest-path nyx/Cargo.toml
+      - uses: actions/download-artifact@v4
+        with:
+          name: win-airplay-controller-x64
+          path: staging
+      - uses: actions/download-artifact@v4
+        with:
+          name: win-airplay-driver-unsigned-x64
+          path: staging/driver
+      - name: Stage and compile installer preview
+        shell: pwsh
+        run: |
+          Copy-Item nyx/target/release/nyxr.exe staging/
+          Copy-Item nyx/LICENSE staging/NYX-LICENSE.txt
+          Copy-Item driver/MICROSOFT-PUBLIC-LICENSE.txt staging/
+          Copy-Item packaging/windows/install.ps1 staging/
+          if (-not (Get-Command makensis.exe -ErrorAction SilentlyContinue)) {
+            choco install nsis --no-progress -y
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $nsis = (Get-Command makensis.exe -ErrorAction SilentlyContinue).Source
+          if (-not $nsis) { $nsis = 'C:\Program Files (x86)\NSIS\makensis.exe' }
+          & $nsis /DVERSION=0.1.0 "/DDIST_DIR=$((Resolve-Path staging).Path)" '/DOUT_FILE=win-airplay-0.1.0-windows-x64-unsigned-preview.exe' packaging/windows/installer.nsi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-airplay-installer-unsigned-preview
+          path: win-airplay-0.1.0-windows-x64-unsigned-preview.exe
+
