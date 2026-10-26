@@ -293,7 +293,8 @@ fn run_manager(sender: String) -> Result<(), String> {
                 && managed.child.is_none()
                 && managed.last_spawn.elapsed() >= Duration::from_secs(5)
             {
-                let args = sender_args(&managed.target, Some(&managed.endpoint), false, 0);
+                let mut args = sender_args(&managed.target, Some(&managed.endpoint), false, 0);
+                args.push("--stats".into());
                 match Command::new(&sender).args(args).spawn() {
                     Ok(child) => {
                         managed.child = Some(child);

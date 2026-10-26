@@ -117,6 +117,8 @@ jobs:
           Copy-Item driver/MICROSOFT-PUBLIC-LICENSE.txt staging/
           Copy-Item packaging/windows/install.ps1 staging/
           Copy-Item packaging/windows/run.ps1 staging/
+          Copy-Item packaging/windows/test-playback.ps1 staging/
+          Copy-Item packaging/windows/assets/test-tone.wav staging/
           if (-not (Get-Command makensis.exe -ErrorAction SilentlyContinue)) {
             choco install nsis --no-progress -y
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
