@@ -99,7 +99,7 @@ fn named_render_output(expected_name: &str) -> Result<IMMDevice, String> {
         let name = unsafe { store.GetValue(&PKEY_Device_FriendlyName) }
             .map_err(|error| error.to_string())?
             .to_string();
-        if name.contains(expected_name) {
+        if name == format!("Speakers ({expected_name})") {
             chosen = Some(device);
             break;
         }
