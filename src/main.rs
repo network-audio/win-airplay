@@ -809,7 +809,10 @@ fn run_usbip_manager() -> Result<(), String> {
         if check_volume {
             last_volume_check = Instant::now();
         }
-        std::thread::sleep(Duration::from_millis(50));
+        // With no AirPlay session, discovery and endpoint controls only need
+        // occasional checks. Avoid waking the manager 20 times per second.
+        let idle = active.values().all(|managed| managed.stream.is_none());
+        std::thread::sleep(Duration::from_millis(if idle { 250 } else { 50 }));
     }
 }
 
