@@ -265,8 +265,8 @@ mod tests {
             channel_gains: Arc::new(RwLock::new(vec![1.0, 0.0])),
         };
         let chunk = source.read_chunk(256).unwrap().unwrap();
-        assert!(chunk.data.chunks_exact(2).all(|frame| frame[1] == 0.0));
-        assert!(chunk.data.chunks_exact(2).any(|frame| frame[0].abs() > 0.0));
+        assert!(chunk.data.chunks(2).all(|frame| frame[1] == 0.0));
+        assert!(chunk.data.chunks(2).any(|frame| frame[0].abs() > 0.0));
     }
 
     #[test]
