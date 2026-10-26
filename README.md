@@ -7,8 +7,11 @@ An early Windows AirPlay 2 output project. The Rust controller discovers local r
 - `win-airplay discover` finds `_airplay._tcp` and `_raop._tcp` services. It has been tested on the local network with Kitchen, Living Room, and The Frame.
 - `win-airplay stream --target "Kitchen"` starts Nyx Refrain with WASAPI loopback capture of the Windows default output. Add `--endpoint "Win AirPlay"` to capture the prototype virtual endpoint once installed.
 - `win-airplay stream --target "Kitchen" --test-tone` requests a three second test tone from Nyx Refrain.
+- A local test tone sent 364 AirPlay 2 packets to Kitchen with timing replies and no retransmit requests. This used a temporary macOS compatibility fix in Nyx Refrain's network enumeration; no Nyx source is included here.
 - The virtual endpoint source is adapted from Microsoft's [SysVAD sample](https://github.com/microsoft/Windows-driver-samples/tree/main/audio/sysvad), licensed under the Microsoft Public License in `driver/MICROSOFT-PUBLIC-LICENSE.txt`. It currently exposes one render endpoint called **Win AirPlay**, rather than a separate endpoint for each discovered speaker.
 - The endpoint package is a development driver. GitHub Actions can build it, but Windows requires signing and installation on a test PC. The CI runner cannot verify endpoint enumeration, loopback capture, or actual playback.
+
+The driver CI build disables WDK API and INF verification because the restored x64 NuGet kit does not include the x86 validator components those tasks invoke. These checks and signing remain required before distribution.
 
 The AirPlay sender is an external program and is not bundled here. Install/build `nyxr` from Nyx Refrain and put it on `PATH`, or pass `--sender C:\\path\\to\\nyxr.exe`. Its source is MIT licensed. The controller launches `nyxr` as a child process, so its AirPlay pairing store and device compatibility follow Nyx Refrain.
 
