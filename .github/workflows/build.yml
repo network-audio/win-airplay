@@ -133,3 +133,112 @@ jobs:
           path: packaging/windows/win-airplay-0.1.0-windows-x64-test-preview.exe
           if-no-files-found: error
 
+  usbip-installer-preview:
+    needs: rust
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: win-airplay-controller-x64
+          path: staging
+      - name: Stage pinned upstream USBip and compile installer
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/vadimgrn/usbip-win2/releases/download/v.0.9.8.1/USBip-0.9.8.1-x64.exe'
+          $upstream = 'staging/USBip-0.9.8.1-x64.exe'
+          Invoke-WebRequest -Uri $url -OutFile $upstream
+          $expected = '38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a'
+          $actual = (Get-FileHash -Algorithm SHA256 $upstream).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "USBip release checksum mismatch: $actual" }
+          Copy-Item vendor/nyx-refrain/LICENSE staging/NYX-LICENSE.txt
+          Copy-Item packaging/windows/USBIP-LICENSE.txt staging/
+          Copy-Item packaging/windows/install-usbip.ps1 staging/
+          Copy-Item packaging/windows/run-usbip.ps1 staging/
+          Copy-Item packaging/windows/test-playback.ps1 staging/
+          Copy-Item packaging/windows/assets/test-tone.wav staging/
+          if (-not (Get-Command makensis.exe -ErrorAction SilentlyContinue)) {
+            choco install nsis --no-progress -y
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $nsis = (Get-Command makensis.exe -ErrorAction SilentlyContinue).Source
+          if (-not $nsis) { $nsis = 'C:\Program Files (x86)\NSIS\makensis.exe' }
+          & $nsis "/DDIST_DIR=$((Resolve-Path staging).Path)" '/DOUT_FILE=win-airplay-usbip-windows-x64-preview.exe' packaging/windows/installer-usbip.nsi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-airplay-installer-usbip-preview
+          path: packaging/windows/win-airplay-usbip-windows-x64-preview.exe
+          if-no-files-found: error
+
+  usbip-windows-smoke:
+    if: github.ref_name == 'codex/usbip-win2-investigation'
+    needs: rust
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: win-airplay-controller-x64
+          path: probe
+      - name: Install USBip and check virtual speaker enumeration
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://github.com/vadimgrn/usbip-win2/releases/download/v.0.9.8.1/USBip-0.9.8.1-x64.exe'
+          Invoke-WebRequest -Uri $url -OutFile USBip-0.9.8.1-x64.exe
+          $expected = '38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a'
+          $actual = (Get-FileHash -Algorithm SHA256 USBip-0.9.8.1-x64.exe).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw 'USBip release checksum mismatch' }
+          $installer = Start-Process -FilePath .\USBip-0.9.8.1-x64.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/COMPONENTS=main,client' -Wait -PassThru
+          if ($installer.ExitCode -notin @(0, 3010)) { throw "USBip installer returned $($installer.ExitCode)" }
+          $usbip = Join-Path ${env:ProgramFiles} 'USBip\usbip.exe'
+          if (-not (Test-Path $usbip)) { throw 'USBip client was not installed' }
+          $probe = Start-Process -FilePath .\probe\win-airplay.exe -ArgumentList 'usbip-probe','--seconds','35','--expect-pcm','--two-speakers' -RedirectStandardOutput probe-out.log -RedirectStandardError probe-err.log -PassThru
+          try {
+            Start-Sleep -Seconds 3
+            $port = (& $usbip --tcp-port 3240 attach --remote 127.0.0.1 --bus-id 1-0123456789abcdef --once --terse | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or $port -notmatch '^\d+$') { throw 'USBip failed to attach the virtual audio device' }
+            $port2 = (& $usbip --tcp-port 3240 attach --remote 127.0.0.1 --bus-id 1-fedcba9876543210 --once --terse | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or $port2 -notmatch '^\d+$') { throw 'USBip failed to attach the second virtual audio device' }
+            try {
+              $found = $false
+              for ($attempt = 0; $attempt -lt 30; $attempt++) {
+                $devices = @(Get-PnpDevice -PresentOnly | Where-Object { $_.FriendlyName -like 'Speakers (Win AirPlay USB Probe*)' })
+                if ($devices.Count -eq 2) { $found = $true; $devices | Format-Table -AutoSize; break }
+                Start-Sleep -Seconds 1
+              }
+              if (-not $found) { throw "Windows did not enumerate both USB audio outputs; found $($devices.Count)" }
+              & $usbip port
+              Start-Sleep -Seconds 2
+              & .\probe\win-airplay.exe usbip-render-test --endpoint 'Win AirPlay USB Probe'
+              if ($LASTEXITCODE -ne 0) { throw 'WASAPI render to virtual USB output failed' }
+              & .\probe\win-airplay.exe usbip-render-test --endpoint 'Win AirPlay USB Probe Two'
+              if ($LASTEXITCODE -ne 0) { throw 'WASAPI render to second virtual USB output failed' }
+              & .\probe\win-airplay.exe usbip-controls-test --endpoint 'Win AirPlay USB Probe'
+              if ($LASTEXITCODE -ne 0) { throw 'Windows endpoint volume or mute test failed' }
+              if (-not $probe.WaitForExit(45000)) { throw 'USB/IP probe did not finish' }
+              if ($probe.ExitCode -ne 0) { throw "USB/IP probe received no PCM (exit $($probe.ExitCode))" }
+            } finally {
+              & $usbip port
+              Start-Process -FilePath $usbip -ArgumentList 'detach','--port',$port -Wait -PassThru | Out-Null
+              Start-Process -FilePath $usbip -ArgumentList 'detach','--port',$port2 -Wait -PassThru | Out-Null
+              $removed = $false
+              for ($attempt = 0; $attempt -lt 20; $attempt++) {
+                $remaining = @(Get-PnpDevice -PresentOnly | Where-Object { $_.FriendlyName -like 'Speakers (Win AirPlay USB Probe*)' })
+                if ($remaining.Count -eq 0) { $removed = $true; break }
+                Start-Sleep -Seconds 1
+              }
+              if (-not $removed) { throw "USB audio outputs remained after detach: $($remaining.Count)" }
+            }
+          } finally {
+            Stop-Process -Id $probe.Id -ErrorAction SilentlyContinue
+            if (Test-Path probe-out.log) { Get-Content probe-out.log }
+            if (Test-Path probe-err.log) { Get-Content probe-err.log }
+          }
+

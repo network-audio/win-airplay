@@ -2,6 +2,7 @@ use capture::sources::sine::SineSource;
 use capture::AudioSource;
 use pipeline::{PipelineMetricsTracker, DEFAULT_RING_BUFFER_PACKETS};
 use raop::ap2::session::{Ap2Config, Ap2Session};
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
@@ -37,6 +38,48 @@ pub struct StreamHandle {
 struct BalancedSource {
     inner: Box<dyn AudioSource + Send>,
     channel_gains: Arc<RwLock<Vec<f32>>>,
+}
+
+struct UsbPcmSource {
+    queue: Arc<crate::usbip_audio::PcmQueue>,
+    pending: VecDeque<f32>,
+}
+
+impl AudioSource for UsbPcmSource {
+    fn sample_rate(&self) -> u32 {
+        44_100
+    }
+    fn channels(&self) -> u16 {
+        2
+    }
+    fn is_live(&self) -> bool {
+        true
+    }
+
+    fn read_chunk(
+        &mut self,
+        max_frames: usize,
+    ) -> Result<Option<capture::AudioChunk>, Box<dyn std::error::Error + Send + Sync>> {
+        if self.pending.is_empty() {
+            if let Some(bytes) = self.queue.pop_timeout(Duration::from_millis(10)) {
+                for pair in bytes.as_chunks::<2>().0 {
+                    self.pending
+                        .push_back(i16::from_le_bytes([pair[0], pair[1]]) as f32 / 32768.0);
+                }
+            }
+        }
+        if self.pending.is_empty() {
+            return Ok(None);
+        }
+        let samples = (max_frames * 2).min(self.pending.len() & !1);
+        let data = self.pending.drain(..samples).collect();
+        Ok(Some(capture::AudioChunk::new(
+            data,
+            44_100,
+            2,
+            std::time::Instant::now(),
+        )))
+    }
 }
 
 impl AudioSource for BalancedSource {
@@ -85,6 +128,53 @@ impl AudioSource for BalancedSource {
 }
 
 impl StreamHandle {
+    pub fn start_usbip(
+        target: SocketAddr,
+        queue: Arc<crate::usbip_audio::PcmQueue>,
+        initial_volume: Volume,
+        initial_channel_gains: Vec<f32>,
+        remote_volume: Option<Sender<f32>>,
+    ) -> Self {
+        let (control, receiver) = mpsc::unbounded_channel();
+        let channel_gains = Arc::new(RwLock::new(initial_channel_gains));
+        let worker_gains = channel_gains.clone();
+        let worker = thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    eprintln!("AirPlay runtime failed: {error}");
+                    return;
+                }
+            };
+            let source = UsbPcmSource {
+                queue,
+                pending: VecDeque::new(),
+            };
+            let balanced = BalancedSource {
+                inner: Box::new(source),
+                channel_gains: worker_gains,
+            };
+            if let Err(error) = runtime.block_on(run_session(
+                target,
+                Box::new(balanced),
+                initial_volume,
+                receiver,
+                remote_volume,
+                None,
+            )) {
+                eprintln!("AirPlay USB stream to {target} ended: {error}");
+            }
+        });
+        Self {
+            control,
+            worker,
+            channel_gains,
+        }
+    }
+
     #[cfg(windows)]
     pub fn start(
         target: SocketAddr,
