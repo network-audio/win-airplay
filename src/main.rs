@@ -634,7 +634,7 @@ fn run_usbip_manager() -> Result<(), String> {
                 _ => {}
             }
             if Instant::now() >= next_report {
-                let reachable = known
+                let reachable: Vec<Speaker> = known
                     .values()
                     .flatten()
                     .filter(|speaker| {
