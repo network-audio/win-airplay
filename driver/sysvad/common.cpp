@@ -15,8 +15,8 @@ Abstract:
 #pragma warning (disable : 4127)
 
 #include <initguid.h>
-#include <devpkey.h>
 #include <sysvad.h>
+#include <devpkey.h>
 #include "hw.h"
 #include "savedata.h"
 #include "IHVPrivatePropertySet.h"
@@ -30,7 +30,6 @@ DEFINE_DEVPROPKEY(DEVPKEY_WinAirPlay_SpeakerName,
 #include <limits.h>
 #include <bthhfpddi.h>
 #include <wdmguid.h>    // guild-arrival/removal
-#include <devpkey.h>
 #include "bthhfpminipairs.h"
 #include "BthhfpDevice.h"
 #endif // SYSVAD_BTH_BYPASS
