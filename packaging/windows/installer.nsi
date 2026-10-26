@@ -1,5 +1,4 @@
 Unicode true
-Target amd64-unicode
 SetCompressor /SOLID lzma
 
 !include "MUI2.nsh"
