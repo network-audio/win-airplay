@@ -74,7 +74,7 @@ jobs:
           Import-Certificate -FilePath test-driver-package/WinAirPlayTest.cer -CertStoreLocation Cert:\CurrentUser\TrustedPublisher | Out-Null
           & $signtool.FullName sign /fd SHA256 /sha1 $cert.Thumbprint /s My test-driver-package/TabletAudioSample.sys
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $inf2cat.FullName /driver:test-driver-package /os:10_X64 /uselocaltime
+          & $inf2cat.FullName /driver:test-driver-package /os:10_NI_X64,10_GE_X64,10_25H2_X64 /uselocaltime
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $signtool.FullName sign /fd SHA256 /sha1 $cert.Thumbprint /s My test-driver-package/sysvad.cat
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
