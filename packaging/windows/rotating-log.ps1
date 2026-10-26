@@ -1,7 +1,7 @@
 function Write-RotatingLog {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$Message
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Message
     )
 
     $maxBytes = 1MB

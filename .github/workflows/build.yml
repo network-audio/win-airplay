@@ -34,6 +34,7 @@ jobs:
           for ($i = 0; $i -lt 180; $i++) {
             Write-RotatingLog -Path $log -Message ('x' * 8192)
           }
+          Write-RotatingLog -Path $log -Message ''
           if (-not (Test-Path "$log.1")) { throw 'Log did not rotate' }
           [System.IO.File]::WriteAllBytes($log, [byte[]]::new(2MB))
           Write-RotatingLog -Path $log -Message ('y' * 1200000)
