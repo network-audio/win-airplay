@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 const SERVICE_TYPES: [&str; 2] = ["_airplay._tcp.local.", "_raop._tcp.local."];
 
 #[cfg(windows)]
+mod windows_audio;
+#[cfg(windows)]
 mod windows_device;
 
 #[derive(Parser)]
@@ -230,6 +232,7 @@ fn run_manager(sender: String) -> Result<(), String> {
         missed_scans: u8,
     }
 
+    windows_audio::initialize()?;
     let mut active: BTreeMap<String, Managed> = BTreeMap::new();
     loop {
         let speakers = discover(4)?;
@@ -242,6 +245,12 @@ fn run_manager(sender: String) -> Result<(), String> {
             let target = speaker.address.to_string();
             if let Some(managed) = active.get_mut(&key) {
                 managed.missed_scans = 0;
+                if managed.target != target {
+                    if let Some(mut child) = managed.child.take() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                }
                 managed.target = target;
                 continue;
             }
@@ -264,8 +273,17 @@ fn run_manager(sender: String) -> Result<(), String> {
             }
         }
 
+        let default_output = windows_audio::default_render_name().unwrap_or_default();
         for managed in active.values_mut() {
             managed.missed_scans = managed.missed_scans.saturating_add(1);
+            let selected = default_output.contains(&managed.endpoint);
+            if !selected {
+                if let Some(mut child) = managed.child.take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                continue;
+            }
             if let Some(child) = managed.child.as_mut() {
                 if child.try_wait().map_err(|e| e.to_string())?.is_some() {
                     managed.child = None;
