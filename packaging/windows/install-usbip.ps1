@@ -1,6 +1,7 @@
 param([ValidateSet('Install', 'Uninstall')][string]$Action)
 
 $ErrorActionPreference = 'Stop'
+Start-Transcript -Path (Join-Path $env:TEMP 'win-airplay-usbip-setup.log') -Force | Out-Null
 $taskName = 'Win AirPlay USBIP'
 $folder = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $folder 'find-usbip.ps1')

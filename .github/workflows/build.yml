@@ -89,12 +89,19 @@ jobs:
         shell: pwsh
         run: |
           $setup = (Resolve-Path packaging/windows/win-airplay-usbip-windows-x64-preview.exe).Path
+          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+          Write-Host "Runner token has administrator permission: $($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))"
           $result = Start-Process -FilePath $setup -ArgumentList '/S' -PassThru
           if (-not $result.WaitForExit(180000)) {
             Stop-Process -Id $result.Id -Force -ErrorAction SilentlyContinue
             throw 'Silent Win AirPlay installer did not exit within three minutes'
           }
-          if ($result.ExitCode -ne 0) { throw "Win AirPlay installer exited with $($result.ExitCode)" }
+          if ($result.ExitCode -ne 0) {
+            $setupLog = Join-Path $env:TEMP 'win-airplay-usbip-setup.log'
+            if (Test-Path $setupLog) { Get-Content $setupLog -Tail 80 }
+            throw "Win AirPlay installer exited with $($result.ExitCode)"
+          }
           $folder = Join-Path ${env:ProgramFiles} 'Win AirPlay USBIP'
           $pathFile = Join-Path $folder 'usbip-path.txt'
           if (-not (Test-Path $pathFile)) { throw 'Installer did not save the USBip executable path' }
