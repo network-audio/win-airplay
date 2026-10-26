@@ -133,5 +133,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: win-airplay-installer-test-preview
-          path: win-airplay-0.1.0-windows-x64-test-preview.exe
+          path: packaging/windows/win-airplay-0.1.0-windows-x64-test-preview.exe
+          if-no-files-found: error
 
