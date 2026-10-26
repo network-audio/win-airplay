@@ -96,6 +96,7 @@ jobs:
           ref: 167d0a7e48724946b37f779e4e4a70df22e38059
           path: nyx
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mlugg/setup-zig@v2
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: nyx
