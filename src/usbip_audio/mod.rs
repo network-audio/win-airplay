@@ -68,6 +68,12 @@ pub struct PcmQueue {
 
 impl PcmQueue {
     fn push(&self, packet: Vec<u8>) {
+        // An idle Windows endpoint can send a continuous stream of zero-filled
+        // URBs. The sender synthesizes silence while active, so retaining those
+        // buffers only starts unnecessary AirPlay sessions and delays real audio.
+        if packet.iter().all(|byte| *byte == 0) {
+            return;
+        }
         let mut packets = self.packets.lock().unwrap();
         if packets.len() == 128 {
             packets.pop_front();
@@ -77,12 +83,12 @@ impl PcmQueue {
         self.ready.notify_one();
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, test))]
     pub fn has_data(&self) -> bool {
         !self.packets.lock().unwrap().is_empty()
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, test))]
     pub fn idle_for(&self) -> Option<Duration> {
         self.last_input.lock().unwrap().map(|time| time.elapsed())
     }
@@ -367,7 +373,14 @@ fn serve_imported(stream: &mut TcpStream, device: &Device, stop: &AtomicBool) ->
                 let (status, data, actual, iso_reply) =
                     handle_submit(device, ep, direction, setup, length, &payload, &iso);
                 if status != 0 && URB_ERRORS_LOGGED.fetch_add(1, Ordering::Relaxed) < 20 {
-                    eprintln!("USB/IP URB failed: ep={ep} direction={direction} setup={setup:02x?} length={length} packets={packets} status={status}");
+                    let alternate = device.state.lock().unwrap().alternate;
+                    let requested_iso_bytes: usize = iso
+                        .as_chunks::<16>()
+                        .0
+                        .iter()
+                        .map(|packet| be32(&packet[4..8]) as usize)
+                        .sum();
+                    eprintln!("USB/IP URB failed: ep={ep} direction={direction} setup={setup:02x?} length={length} packets={packets} alternate={alternate} requested_iso_bytes={requested_iso_bytes} status={status}");
                 }
                 let mut out = Vec::with_capacity(48 + data.len() + iso_reply.len());
                 put_u32(&mut out, 3);
@@ -439,13 +452,10 @@ fn handle_submit(
     let mut actual = 0usize;
     let mut cursor = 0usize;
     for entry in reply.as_chunks_mut::<16>().0 {
-        let packet_len = be32(&entry[4..8]) as usize;
-        if cursor
-            .checked_add(packet_len)
-            .is_none_or(|end| end > payload.len())
-        {
-            return (EPIPE, Vec::new(), 0, Vec::new());
-        }
+        // Windows can submit a short final isochronous buffer while retaining
+        // the requested size in each packet descriptor. Complete the available
+        // frames and report the actual length of each packet.
+        let packet_len = (be32(&entry[4..8]) as usize).min(payload.len() - cursor);
         compact.extend_from_slice(&payload[cursor..cursor + packet_len]);
         cursor += packet_len;
         entry[8..12].copy_from_slice(&(packet_len as u32).to_be_bytes());
@@ -586,6 +596,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn idle_silence_does_not_trigger_a_stream() {
+        let queue = PcmQueue::default();
+        queue.push(vec![0; 1764]);
+        assert!(!queue.has_data());
+        assert!(queue.idle_for().is_none());
+        queue.push(vec![1, 0, 0, 0]);
+        assert!(queue.has_data());
+    }
+
+    #[test]
     fn descriptors_are_well_formed() {
         let config = configuration_descriptor();
         assert_eq!(
@@ -705,6 +725,23 @@ mod tests {
         assert_eq!(
             streams.pcm.pop_timeout(Duration::from_secs(2)).unwrap(),
             pcm
+        );
+
+        // A short Windows isochronous transfer can contain fewer data bytes
+        // than the sum of the requested per-packet lengths.
+        let short_pcm = &pcm[..6];
+        client
+            .write_all(&submit(6, 0, 1, [0; 8], short_pcm, 2, &iso))
+            .unwrap();
+        client.read_exact(&mut reply).unwrap();
+        assert_eq!(be32(&reply[20..24]), 0);
+        assert_eq!(be32(&reply[24..28]), 6);
+        client.read_exact(&mut iso_reply).unwrap();
+        assert_eq!(be32(&iso_reply[8..12]), 4);
+        assert_eq!(be32(&iso_reply[24..28]), 2);
+        assert_eq!(
+            streams.pcm.pop_timeout(Duration::from_secs(2)).unwrap(),
+            short_pcm
         );
     }
 

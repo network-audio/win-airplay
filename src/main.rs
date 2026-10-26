@@ -672,13 +672,7 @@ fn run_usbip_manager() -> Result<(), String> {
                 false
             });
         }
-        let selected_output = windows_audio::default_render_output()
-            .ok()
-            .map(|output| output.name);
         for managed in active.values_mut() {
-            let selected = selected_output
-                .as_ref()
-                .is_some_and(|name| name.contains(&managed.endpoint));
             if managed.port.is_none() && managed.last_attach.elapsed() >= Duration::from_secs(5) {
                 managed.last_attach = Instant::now();
                 match usbip_attach(server.port(), &managed.busid) {
@@ -711,12 +705,12 @@ fn run_usbip_manager() -> Result<(), String> {
             let inactive = managed
                 .pcm
                 .idle_for()
-                .is_none_or(|age| age >= Duration::from_secs(5));
+                .is_none_or(|age| age >= Duration::from_secs(10));
             if managed
                 .stream
                 .as_ref()
                 .is_some_and(|stream| stream.is_finished())
-                || (!selected && inactive)
+                || inactive
             {
                 if let Some(stream) = managed.stream.take() {
                     stream.stop();
@@ -725,12 +719,11 @@ fn run_usbip_manager() -> Result<(), String> {
             }
             if managed.port.is_some()
                 && managed.stream.is_none()
-                && (selected
-                    || (managed.pcm.has_data()
-                        && managed
-                            .pcm
-                            .idle_for()
-                            .is_some_and(|age| age < Duration::from_secs(5))))
+                && managed.pcm.has_data()
+                && managed
+                    .pcm
+                    .idle_for()
+                    .is_some_and(|age| age < Duration::from_secs(5))
                 && managed.last_spawn.elapsed() >= Duration::from_secs(5)
             {
                 let (remote_tx, remote_rx) = mpsc::channel();

@@ -22,6 +22,8 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --locked
+      - if: runner.os == 'Windows'
+        run: cargo test --manifest-path vendor/nyx-refrain/Cargo.toml -p raop --lib
       - run: cargo build --release --locked
       - if: runner.os == 'Windows'
         name: Check bounded log rotation
