@@ -122,7 +122,7 @@ impl SoftwareDevice {
             buffer: name_value.as_ptr().cast(),
         };
 
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::channel::<Result<(), i32>>();
         let context = Box::into_raw(Box::new(sender)).cast();
         let mut handle = ptr::null_mut();
         let result = unsafe {
