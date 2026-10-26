@@ -146,7 +146,7 @@ impl Speaker {
             StreamProfile {
                 encoding,
                 latency_frames: -1_764, // -40 ms at 44.1 kHz
-                start_lead_ms: 300,
+                start_lead_ms: 1_000,
             }
         } else {
             StreamProfile {
@@ -1151,7 +1151,7 @@ mod tests {
             AudioEncoding::CompressedAlac
         );
         assert_eq!(speaker.stream_profile().latency_frames, -1_764);
-        assert_eq!(speaker.stream_profile().start_lead_ms, 300);
+        assert_eq!(speaker.stream_profile().start_lead_ms, 1_000);
         assert_eq!(speaker.stream_profile().prefill_ms(), 100);
         speaker.codecs = vec![0];
         assert_eq!(speaker.stream_profile().encoding, AudioEncoding::Pcm);
