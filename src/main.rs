@@ -12,6 +12,7 @@ const SERVICE_TYPES: [&str; 2] = ["_airplay._tcp.local.", "_raop._tcp.local."];
 
 #[cfg(windows)]
 mod airplay;
+mod usbip_audio;
 #[cfg(windows)]
 mod windows_audio;
 #[cfg(windows)]
@@ -50,6 +51,14 @@ enum Action {
     },
     /// Keep one Windows output endpoint for each discovered AirPlay device.
     Run,
+    /// Use usbip-win2 and a Rust virtual USB audio server for the outputs.
+    RunUsbip,
+    /// Export one virtual USB speaker for a Windows USB/IP enumeration check.
+    #[command(hide = true)]
+    UsbipProbe {
+        #[arg(long, default_value_t = 90)]
+        seconds: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -195,6 +204,18 @@ fn run(cli: Cli) -> Result<(), String> {
             run_manual_stream(target, endpoint)?;
         }
         Action::Run => run_manager()?,
+        Action::RunUsbip => run_usbip_manager()?,
+        Action::UsbipProbe { seconds } => {
+            let server = usbip_audio::Server::start(3240).map_err(|error| error.to_string())?;
+            let streams = server.add("0123456789abcdef", "Win AirPlay USB Probe");
+            println!(
+                "USB/IP probe busid={} port={}",
+                streams.busid,
+                server.port()
+            );
+            std::thread::sleep(Duration::from_secs(seconds));
+            server.remove(&streams.busid);
+        }
     }
     Ok(())
 }
@@ -411,6 +432,233 @@ fn run_manager() -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(150));
     }
+}
+
+#[cfg(windows)]
+fn usbip_executable() -> std::path::PathBuf {
+    std::env::var_os("WIN_AIRPLAY_USBIP_EXE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Program Files\USBip\usbip.exe"))
+}
+
+#[cfg(windows)]
+fn usbip_attach(port: u16, busid: &str) -> Result<u32, String> {
+    let output = std::process::Command::new(usbip_executable())
+        .args([
+            "--tcp-port",
+            &port.to_string(),
+            "attach",
+            "--remote",
+            "127.0.0.1",
+            "--bus-id",
+            busid,
+            "--once",
+            "--terse",
+        ])
+        .output()
+        .map_err(|error| format!("usbip-win2 attach failed to start: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "usbip-win2 attach failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u32>()
+        .map_err(|error| format!("usbip-win2 returned an invalid port: {error}"))
+}
+
+#[cfg(windows)]
+fn usbip_detach(port: u32) {
+    if let Err(error) = std::process::Command::new(usbip_executable())
+        .args(["detach", "--port", &port.to_string()])
+        .status()
+    {
+        eprintln!("Could not detach USB/IP port {port}: {error}");
+    }
+}
+
+#[cfg(windows)]
+fn run_usbip_manager() -> Result<(), String> {
+    use std::sync::mpsc;
+    use std::sync::Arc;
+
+    struct Managed {
+        endpoint: String,
+        busid: String,
+        target: SocketAddr,
+        pcm: Arc<usbip_audio::PcmQueue>,
+        volume_events: mpsc::Receiver<usbip_audio::Volume>,
+        volume: usbip_audio::Volume,
+        stream: Option<airplay::StreamHandle>,
+        remote_volume: Option<mpsc::Receiver<f32>>,
+        port: Option<u32>,
+        last_attach: Instant,
+        last_spawn: Instant,
+        missed_scans: u8,
+    }
+
+    windows_audio::initialize()?;
+    let server =
+        usbip_audio::Server::start(3240).map_err(|error| format!("USB/IP server: {error}"))?;
+    let (discovery_tx, discovery_rx) = mpsc::channel();
+    std::thread::spawn(move || loop {
+        match discover(4) {
+            Ok(speakers) => {
+                let reachable = speakers
+                    .into_iter()
+                    .filter(|speaker| {
+                        speaker.service == SERVICE_TYPES[0]
+                            && std::net::TcpStream::connect_timeout(
+                                &SocketAddr::new(speaker.address, speaker.port),
+                                Duration::from_millis(400),
+                            )
+                            .is_ok()
+                    })
+                    .collect::<Vec<_>>();
+                if discovery_tx.send(reachable).is_err() {
+                    break;
+                }
+            }
+            Err(error) => eprintln!("AirPlay discovery failed: {error}"),
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    });
+    let mut active: BTreeMap<String, Managed> = BTreeMap::new();
+    loop {
+        while let Ok(speakers) = discovery_rx.try_recv() {
+            for managed in active.values_mut() {
+                managed.missed_scans = managed.missed_scans.saturating_add(1);
+            }
+            for speaker in speakers {
+                let key = speaker_key(&speaker);
+                let target = SocketAddr::new(speaker.address, speaker.port);
+                if let Some(managed) = active.get_mut(&key) {
+                    managed.missed_scans = 0;
+                    if managed.target != target {
+                        if let Some(stream) = managed.stream.take() {
+                            stream.stop();
+                        }
+                        managed.remote_volume = None;
+                        managed.target = target;
+                    }
+                    continue;
+                }
+                let endpoint = endpoint_name(&speaker);
+                let streams = server.add(&key, &endpoint);
+                let port = match usbip_attach(server.port(), &streams.busid) {
+                    Ok(port) => Some(port),
+                    Err(error) => {
+                        eprintln!("Could not attach {endpoint}: {error}");
+                        None
+                    }
+                };
+                println!("USB output {endpoint} for {target}");
+                active.insert(
+                    key,
+                    Managed {
+                        endpoint,
+                        busid: streams.busid,
+                        target,
+                        pcm: streams.pcm,
+                        volume_events: streams.volume,
+                        volume: usbip_audio::Volume::default(),
+                        stream: None,
+                        remote_volume: None,
+                        port,
+                        last_attach: Instant::now(),
+                        last_spawn: Instant::now() - Duration::from_secs(10),
+                        missed_scans: 0,
+                    },
+                );
+            }
+            active.retain(|_, managed| {
+                if managed.missed_scans < 3 {
+                    return true;
+                }
+                if let Some(stream) = managed.stream.take() {
+                    stream.stop();
+                }
+                if let Some(port) = managed.port {
+                    usbip_detach(port);
+                }
+                server.remove(&managed.busid);
+                println!("Removed USB output {}", managed.endpoint);
+                false
+            });
+        }
+        for managed in active.values_mut() {
+            if managed.port.is_none() && managed.last_attach.elapsed() >= Duration::from_secs(5) {
+                managed.last_attach = Instant::now();
+                match usbip_attach(server.port(), &managed.busid) {
+                    Ok(port) => managed.port = Some(port),
+                    Err(error) => eprintln!("Could not attach {}: {error}", managed.endpoint),
+                }
+            }
+            while let Ok(volume) = managed.volume_events.try_recv() {
+                managed.volume = volume;
+                if let Some(stream) = &managed.stream {
+                    stream.set_volume(airplay::Volume {
+                        scalar: volume.scalar,
+                        muted: volume.muted,
+                    });
+                    stream.set_channel_gains(volume.channels.to_vec());
+                }
+            }
+            if let Some(remote) = &managed.remote_volume {
+                while let Ok(scalar) = remote.try_recv() {
+                    managed.volume.scalar = scalar;
+                    managed.volume.muted = scalar <= 0.0;
+                    server.set_volume(&managed.busid, managed.volume);
+                    if let Err(error) =
+                        windows_audio::set_default_volume_if_name(&managed.endpoint, scalar)
+                    {
+                        eprintln!("Could not mirror speaker volume to Windows: {error}");
+                    }
+                }
+            }
+            if managed
+                .stream
+                .as_ref()
+                .is_some_and(|stream| stream.is_finished())
+                || managed
+                    .pcm
+                    .idle_for()
+                    .is_some_and(|age| age >= Duration::from_secs(5))
+            {
+                if let Some(stream) = managed.stream.take() {
+                    stream.stop();
+                }
+                managed.remote_volume = None;
+            }
+            if managed.port.is_some()
+                && managed.stream.is_none()
+                && managed.pcm.has_data()
+                && managed.last_spawn.elapsed() >= Duration::from_secs(5)
+            {
+                let (remote_tx, remote_rx) = mpsc::channel();
+                managed.stream = Some(airplay::StreamHandle::start_usbip(
+                    managed.target,
+                    managed.pcm.clone(),
+                    airplay::Volume {
+                        scalar: managed.volume.scalar,
+                        muted: managed.volume.muted,
+                    },
+                    managed.volume.channels.to_vec(),
+                    Some(remote_tx),
+                ));
+                managed.remote_volume = Some(remote_rx);
+                managed.last_spawn = Instant::now();
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[cfg(not(windows))]
+fn run_usbip_manager() -> Result<(), String> {
+    Err("USB/IP audio endpoint attachment requires Windows".into())
 }
 
 #[cfg(not(windows))]

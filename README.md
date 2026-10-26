@@ -22,3 +22,5 @@ cargo build --release --locked
 ```
 
 GitHub Actions builds the Windows driver and installer. The driver includes SysVAD code under the [Microsoft Public License](driver/MICROSOFT-PUBLIC-LICENSE.txt); the linked Nyx crates are MIT licensed.
+
+The separate [USB/IP backend spike](docs/usbip-win2-feasibility.md) is available on its investigation branch.

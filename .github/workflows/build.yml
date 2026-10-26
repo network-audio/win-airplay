@@ -133,3 +133,43 @@ jobs:
           path: packaging/windows/win-airplay-0.1.0-windows-x64-test-preview.exe
           if-no-files-found: error
 
+  usbip-installer-preview:
+    needs: rust
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: win-airplay-controller-x64
+          path: staging
+      - name: Stage pinned upstream USBip and compile installer
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/vadimgrn/usbip-win2/releases/download/v.0.9.8.1/USBip-0.9.8.1-x64.exe'
+          $upstream = 'staging/USBip-0.9.8.1-x64.exe'
+          Invoke-WebRequest -Uri $url -OutFile $upstream
+          $expected = '38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a'
+          $actual = (Get-FileHash -Algorithm SHA256 $upstream).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "USBip release checksum mismatch: $actual" }
+          Copy-Item vendor/nyx-refrain/LICENSE staging/NYX-LICENSE.txt
+          Copy-Item packaging/windows/USBIP-LICENSE.txt staging/
+          Copy-Item packaging/windows/install-usbip.ps1 staging/
+          Copy-Item packaging/windows/run-usbip.ps1 staging/
+          Copy-Item packaging/windows/test-playback.ps1 staging/
+          Copy-Item packaging/windows/assets/test-tone.wav staging/
+          if (-not (Get-Command makensis.exe -ErrorAction SilentlyContinue)) {
+            choco install nsis --no-progress -y
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $nsis = (Get-Command makensis.exe -ErrorAction SilentlyContinue).Source
+          if (-not $nsis) { $nsis = 'C:\Program Files (x86)\NSIS\makensis.exe' }
+          & $nsis "/DDIST_DIR=$((Resolve-Path staging).Path)" '/DOUT_FILE=win-airplay-usbip-windows-x64-preview.exe' packaging/windows/installer-usbip.nsi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-airplay-installer-usbip-preview
+          path: packaging/windows/win-airplay-usbip-windows-x64-preview.exe
+          if-no-files-found: error
+
