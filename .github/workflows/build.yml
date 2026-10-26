@@ -71,6 +71,7 @@ jobs:
           Copy-Item vendor/nyx-refrain/LICENSE staging/NYX-LICENSE.txt
           Copy-Item packaging/windows/USBIP-LICENSE.txt staging/
           Copy-Item packaging/windows/install-usbip.ps1 staging/
+          Copy-Item packaging/windows/find-usbip.ps1 staging/
           Copy-Item packaging/windows/run-usbip.ps1 staging/
           Copy-Item packaging/windows/rotating-log.ps1 staging/
           Copy-Item packaging/windows/test-playback.ps1 staging/
@@ -83,6 +84,22 @@ jobs:
           if (-not $nsis) { $nsis = 'C:\Program Files (x86)\NSIS\makensis.exe' }
           & $nsis "/DDIST_DIR=$((Resolve-Path staging).Path)" '/DOUT_FILE=win-airplay-usbip-windows-x64-preview.exe' packaging/windows/installer-usbip.nsi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install bundled preview and verify USBip path
+        shell: pwsh
+        run: |
+          $setup = (Resolve-Path packaging/windows/win-airplay-usbip-windows-x64-preview.exe).Path
+          $result = Start-Process -FilePath $setup -ArgumentList '/S' -Wait -PassThru
+          if ($result.ExitCode -ne 0) { throw "Win AirPlay installer exited with $($result.ExitCode)" }
+          $folder = Join-Path ${env:ProgramFiles} 'Win AirPlay USBIP'
+          $pathFile = Join-Path $folder 'usbip-path.txt'
+          if (-not (Test-Path $pathFile)) { throw 'Installer did not save the USBip executable path' }
+          $usbip = [System.IO.File]::ReadAllText($pathFile).Trim()
+          if (-not (Test-Path -LiteralPath $usbip -PathType Leaf)) { throw "USBip executable is missing: $usbip" }
+          $ps32 = Join-Path $env:WINDIR 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'
+          $finder = (Resolve-Path packaging/windows/find-usbip.ps1).Path.Replace("'", "''")
+          $found32 = & $ps32 -NoProfile -ExecutionPolicy Bypass -Command ". '$finder'; Find-UsbipExecutable"
+          if ($found32 -ne $usbip) { throw "32-bit PowerShell found '$found32' instead of '$usbip'" }
+          Write-Host "Bundled installer found USBip at $usbip"
       - uses: actions/upload-artifact@v4
         with:
           name: win-airplay-installer-usbip-preview
@@ -111,10 +128,12 @@ jobs:
           $expected = '38cad6d4432b52d5bb9409d9ad03b72fdffc4ada4cd3a48fbeca1a2752a8518a'
           $actual = (Get-FileHash -Algorithm SHA256 USBip-0.9.8.1-x64.exe).Hash.ToLowerInvariant()
           if ($actual -ne $expected) { throw 'USBip release checksum mismatch' }
-          $installer = Start-Process -FilePath .\USBip-0.9.8.1-x64.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/COMPONENTS=main,client' -Wait -PassThru
+          $customDir = Join-Path $env:RUNNER_TEMP 'USBip custom location'
+          $installer = Start-Process -FilePath .\USBip-0.9.8.1-x64.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/COMPONENTS=main,client',"/DIR=`"$customDir`"" -Wait -PassThru
           if ($installer.ExitCode -notin @(0, 3010)) { throw "USBip installer returned $($installer.ExitCode)" }
-          $usbip = Join-Path ${env:ProgramFiles} 'USBip\usbip.exe'
-          if (-not (Test-Path $usbip)) { throw 'USBip client was not installed' }
+          . ./packaging/windows/find-usbip.ps1
+          $usbip = Find-UsbipExecutable
+          if (-not $usbip -or $usbip -ne (Join-Path $customDir 'usbip.exe')) { throw "USBip client was not found at its custom install location: $usbip" }
           $probe = Start-Process -FilePath .\probe\win-airplay.exe -ArgumentList 'usbip-probe','--seconds','35','--expect-pcm','--two-speakers' -RedirectStandardOutput probe-out.log -RedirectStandardError probe-err.log -PassThru
           try {
             Start-Sleep -Seconds 3

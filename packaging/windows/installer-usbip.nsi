@@ -25,10 +25,17 @@ RequestExecutionLevel admin
 !insertmacro MUI_LANGUAGE "English"
 
 Section "Win AirPlay USB/IP" Main
+  UserInfo::GetAccountType
+  Pop $0
+  ${If} $0 != "Admin"
+    MessageBox MB_ICONSTOP "Administrator permission is required. Please approve the Windows elevation prompt."
+    Abort
+  ${EndIf}
   SetRegView 64
   SetOutPath "$INSTDIR"
   File "${DIST_DIR}\win-airplay.exe"
   File "${DIST_DIR}\install-usbip.ps1"
+  File "${DIST_DIR}\find-usbip.ps1"
   File "${DIST_DIR}\run-usbip.ps1"
   File "${DIST_DIR}\rotating-log.ps1"
   File "${DIST_DIR}\test-playback.ps1"
@@ -54,6 +61,8 @@ Section "Uninstall"
   Pop $0
   Delete "$INSTDIR\win-airplay.exe"
   Delete "$INSTDIR\install-usbip.ps1"
+  Delete "$INSTDIR\find-usbip.ps1"
+  Delete "$INSTDIR\usbip-path.txt"
   Delete "$INSTDIR\run-usbip.ps1"
   Delete "$INSTDIR\rotating-log.ps1"
   Delete "$INSTDIR\test-playback.ps1"

@@ -5,7 +5,7 @@ Win AirPlay adds discovered AirPlay 2 speakers to the standard Windows sound out
 ## Install the Windows preview
 
 1. Download `win-airplay-installer-usbip-preview` from the artifacts of the [latest successful main build](https://github.com/stakach/win-airplay/actions/workflows/build.yml?query=branch%3Amain).
-2. Run the installer as an administrator. It installs Win AirPlay and its bundled USBip client, then starts the controller at sign-in. Restart Windows if the installer requests it.
+2. Run the installer and approve the Windows administrator prompt. It installs Win AirPlay and its bundled USBip client, then starts the controller at sign-in. Restart Windows if the installer requests it.
 3. Select an AirPlay speaker in the Windows sound picker. For a playback check, run `test-playback.ps1` from the install folder. Controller logs are at `%LOCALAPPDATA%\WinAirPlay\controller-usbip.log` and rotate at 1 MiB, retaining at most two files.
 
 ## How it works
