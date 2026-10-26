@@ -35,8 +35,8 @@ jobs:
           [[ "$conclusion" == success && "$branch" == main ]]
           printf '%s\n' "$sha" > build-sha.txt
           mkdir installer
-          gh run download "$BUILD_RUN_ID" --name win-airplay-installer-test-preview --dir installer
-          test "$(find installer -maxdepth 1 -name '*-test-preview.exe' | wc -l)" -eq 1
+          gh run download "$BUILD_RUN_ID" --name win-airplay-installer-usbip-preview --dir installer
+          test -f installer/win-airplay-usbip-windows-x64-preview.exe
       - name: Publish prerelease
         env:
           GH_TOKEN: ${{ github.token }}
@@ -45,6 +45,6 @@ jobs:
         run: |
           set -euo pipefail
           sha=$(cat build-sha.txt)
-          gh release create "$TAG" installer/*-test-preview.exe \
+          gh release create "$TAG" installer/win-airplay-usbip-windows-x64-preview.exe \
             --target "$sha" --prerelease --title "Win AirPlay $TAG development preview" \
             --notes-file RELEASE_PREVIEW.md

@@ -1,11 +1,7 @@
 # Win AirPlay development preview
 
-This installer includes a self-signed test driver and one Rust executable with Nyx Refrain's AirPlay crates linked in. No separate Nyx installation is needed. It is for a disposable Windows 11 test machine running Test Mode. Windows endpoint enumeration, audible playback, volume, mute, disconnect, and uninstall have not yet been verified.
+This installer adds AirPlay 2 speakers to the Windows sound output picker. It includes the Rust controller, the pinned usbip-win2 client and USB drivers, and Nyx Refrain linked into the controller. No separate Nyx installation is needed. Restart Windows if the installer requests it.
 
-Before installing, [enable Windows Test Mode](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/the-testsigning-boot-configuration-option) from an elevated command prompt and restart. Secure Boot may need to be disabled in firmware. The installer does not change boot settings. The driver targets Windows 11 22H2 or later. Windows may display a Test Mode watermark.
+The controller discovers reachable speakers, presents each as a virtual USB audio output, and starts at sign-in for the installing user. Select a speaker in the Windows sound picker, then run `test-playback.ps1` from the install folder for a test tone. Logs are in `%LOCALAPPDATA%\WinAirPlay\controller-usbip.log` and rotate at 1 MiB, with at most two files.
 
-The installer registers an elevated interactive logon task for the installing user. Logs are written to `%LOCALAPPDATA%\WinAirPlay\controller.log`. Uninstall from Windows Apps after testing. Restore the original boot settings when finished.
-
-For a playback check, select an AirPlay output in the Windows sound picker and run `test-playback.ps1` from the installed folder in PowerShell. It repeats a tone through the selected Windows output and prints the recent controller log. Check Windows volume, mute, and left/right balance, then turn off the selected speaker and confirm that its output disappears. The check still needs a person to confirm whether the receiver played the tone.
-
-This is an engineering preview, not the first stable release. Report which speakers appear in the output picker, whether selecting one routes playback, and any installation errors with the controller log and `%windir%\inf\setupapi.dev.log`.
+Windows CI has tested two simultaneous outputs, PCM input, endpoint volume and mute controls, and removal after detach. Audible playback to an AirPlay receiver and live disconnect behavior still need testing on a Windows machine. Please report the speaker model, Windows version, installation result, and controller log when testing.
