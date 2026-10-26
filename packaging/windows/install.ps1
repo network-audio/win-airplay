@@ -11,8 +11,7 @@ if ($Action -eq 'Uninstall') {
 
 $folder = Split-Path -Parent $MyInvocation.MyCommand.Path
 $driver = Join-Path $folder 'driver\ComponentizedAudioSample.inf'
-$controller = Join-Path $folder 'win-airplay.exe'
-$sender = Join-Path $folder 'nyxr.exe'
+$launcher = Join-Path $folder 'run.ps1'
 
 if (-not (Test-Path (Join-Path $folder 'driver\sysvad.cat'))) {
     throw 'The test-signed driver catalog is missing.'
@@ -33,7 +32,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-$taskAction = New-ScheduledTaskAction -Execute $controller -Argument "run --sender `"$sender`""
+$taskAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$launcher`""
 $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $user
 $taskPrincipal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
 Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $taskTrigger -Principal $taskPrincipal -Force | Out-Null

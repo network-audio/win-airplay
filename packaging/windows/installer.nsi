@@ -35,6 +35,7 @@ Section "Win AirPlay" Main
   File "${DIST_DIR}\win-airplay.exe"
   File "${DIST_DIR}\nyxr.exe"
   File "${DIST_DIR}\install.ps1"
+  File "${DIST_DIR}\run.ps1"
   File "${DIST_DIR}\NYX-LICENSE.txt"
   File "${DIST_DIR}\MICROSOFT-PUBLIC-LICENSE.txt"
   SetOutPath "$INSTDIR\driver"
@@ -44,6 +45,10 @@ Section "Win AirPlay" Main
   File "${DIST_DIR}\driver\sysvad.cat"
   File "${DIST_DIR}\driver\WinAirPlayTest.cer"
 
+  WriteUninstaller "$INSTDIR\Uninstall.exe"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\WinAirPlay" "DisplayName" "Win AirPlay"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\WinAirPlay" "UninstallString" '"$INSTDIR\Uninstall.exe"'
+
   nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\install.ps1" -Action Install'
   Pop $0
   ${If} $0 != 0
@@ -51,9 +56,6 @@ Section "Win AirPlay" Main
     Abort
   ${EndIf}
 
-  WriteUninstaller "$INSTDIR\Uninstall.exe"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\WinAirPlay" "DisplayName" "Win AirPlay"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\WinAirPlay" "UninstallString" '"$INSTDIR\Uninstall.exe"'
 SectionEnd
 
 Section "Uninstall"
@@ -62,6 +64,7 @@ Section "Uninstall"
   Delete "$INSTDIR\win-airplay.exe"
   Delete "$INSTDIR\nyxr.exe"
   Delete "$INSTDIR\install.ps1"
+  Delete "$INSTDIR\run.ps1"
   Delete "$INSTDIR\NYX-LICENSE.txt"
   Delete "$INSTDIR\MICROSOFT-PUBLIC-LICENSE.txt"
   Delete "$INSTDIR\driver\ComponentizedAudioSample.inf"
