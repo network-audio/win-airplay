@@ -28,7 +28,7 @@ Section "Win AirPlay USB/IP" Main
   UserInfo::GetAccountType
   Pop $0
   ${If} $0 != "Admin"
-    MessageBox MB_ICONSTOP "Administrator permission is required. Please approve the Windows elevation prompt."
+    MessageBox MB_ICONSTOP "Administrator permission is required. Please approve the Windows elevation prompt." /SD IDOK
     Abort
   ${EndIf}
   SetRegView 64
@@ -47,7 +47,7 @@ Section "Win AirPlay USB/IP" Main
   nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\install-usbip.ps1" -Action Install'
   Pop $0
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP "USB/IP installation or startup failed."
+    MessageBox MB_ICONSTOP "USB/IP installation or startup failed." /SD IDOK
     Abort
   ${EndIf}
 

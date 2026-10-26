@@ -51,6 +51,7 @@ jobs:
   installer-preview:
     needs: rust
     runs-on: windows-2025
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -88,7 +89,11 @@ jobs:
         shell: pwsh
         run: |
           $setup = (Resolve-Path packaging/windows/win-airplay-usbip-windows-x64-preview.exe).Path
-          $result = Start-Process -FilePath $setup -ArgumentList '/S' -Wait -PassThru
+          $result = Start-Process -FilePath $setup -ArgumentList '/S' -PassThru
+          if (-not $result.WaitForExit(180000)) {
+            Stop-Process -Id $result.Id -Force -ErrorAction SilentlyContinue
+            throw 'Silent Win AirPlay installer did not exit within three minutes'
+          }
           if ($result.ExitCode -ne 0) { throw "Win AirPlay installer exited with $($result.ExitCode)" }
           $folder = Join-Path ${env:ProgramFiles} 'Win AirPlay USBIP'
           $pathFile = Join-Path $folder 'usbip-path.txt'
