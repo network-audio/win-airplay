@@ -8,7 +8,8 @@ Read-Host | Out-Null
 Start-Sleep -Seconds 7
 
 $player = New-Object System.Media.SoundPlayer $tone
-for ($i = 0; $i -lt 3; $i++) {
+Write-Host 'The tone will repeat for about 18 seconds. Adjust Windows volume, then toggle mute while it plays.'
+for ($i = 0; $i -lt 6; $i++) {
     $player.PlaySync()
 }
 Start-Sleep -Seconds 2
@@ -21,4 +22,4 @@ if (Test-Path $log) {
 } else {
     Write-Warning "Controller log not found at $log"
 }
-Write-Host 'The tone should have played on the selected receiver. Save the log when reporting a problem.'
+Write-Host 'The tone should have played on the selected receiver and followed Windows volume and mute. Save the log when reporting a problem.'
