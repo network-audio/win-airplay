@@ -67,6 +67,12 @@ enum Action {
         #[arg(long)]
         endpoint: String,
     },
+    /// Check Windows master, channel, and mute controls for a named USB output.
+    #[command(hide = true)]
+    UsbipControlsTest {
+        #[arg(long)]
+        endpoint: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -253,6 +259,18 @@ fn run(cli: Cli) -> Result<(), String> {
             {
                 let _ = endpoint;
                 return Err("WASAPI render testing requires Windows".into());
+            }
+        }
+        Action::UsbipControlsTest { endpoint } => {
+            #[cfg(windows)]
+            {
+                windows_audio::initialize()?;
+                windows_audio::test_endpoint_controls(&endpoint)?;
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = endpoint;
+                return Err("Windows endpoint control testing requires Windows".into());
             }
         }
     }

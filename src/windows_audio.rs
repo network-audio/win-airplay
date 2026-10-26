@@ -2,8 +2,8 @@ use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Foundation::BOOL;
 use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::{
-    eConsole, eRender, IAudioClient, IAudioRenderClient, IMMDeviceEnumerator, MMDeviceEnumerator,
-    AUDCLNT_SHAREMODE_SHARED, DEVICE_STATE_ACTIVE, WAVEFORMATEX,
+    eConsole, eRender, IAudioClient, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator,
+    MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED, DEVICE_STATE_ACTIVE, WAVEFORMATEX,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
@@ -84,8 +84,7 @@ pub fn set_default_volume_if_name(expected_name: &str, scalar: f32) -> Result<()
     Ok(())
 }
 
-/// Render through a named endpoint without changing the system default output.
-pub fn play_test_tone(expected_name: &str, duration: std::time::Duration) -> Result<(), String> {
+fn named_render_output(expected_name: &str) -> Result<IMMDevice, String> {
     let enumerator: IMMDeviceEnumerator =
         unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
             .map_err(|error| error.to_string())?;
@@ -105,8 +104,12 @@ pub fn play_test_tone(expected_name: &str, duration: std::time::Duration) -> Res
             break;
         }
     }
-    let device = chosen
-        .ok_or_else(|| format!("Audio endpoint containing {expected_name:?} was not found"))?;
+    chosen.ok_or_else(|| format!("Audio endpoint containing {expected_name:?} was not found"))
+}
+
+/// Render through a named endpoint without changing the system default output.
+pub fn play_test_tone(expected_name: &str, duration: std::time::Duration) -> Result<(), String> {
+    let device = named_render_output(expected_name)?;
     let client: IAudioClient =
         unsafe { device.Activate(CLSCTX_ALL, None) }.map_err(|error| error.to_string())?;
     let format = WAVEFORMATEX {
@@ -150,4 +153,51 @@ pub fn play_test_tone(expected_name: &str, duration: std::time::Duration) -> Res
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     unsafe { client.Stop() }.map_err(|error| format!("Stop: {error}"))
+}
+
+/// Exercise the endpoint controls used by the Windows sound picker.
+pub fn test_endpoint_controls(expected_name: &str) -> Result<(), String> {
+    let device = named_render_output(expected_name)?;
+    let endpoint: IAudioEndpointVolume =
+        unsafe { device.Activate(CLSCTX_ALL, None) }.map_err(|error| error.to_string())?;
+    let original_master =
+        unsafe { endpoint.GetMasterVolumeLevelScalar() }.map_err(|error| error.to_string())?;
+    let original_mute = unsafe { endpoint.GetMute() }.map_err(|error| error.to_string())?;
+    let channels = unsafe { endpoint.GetChannelCount() }.map_err(|error| error.to_string())?;
+    if channels < 2 {
+        return Err(format!(
+            "Expected stereo volume controls; found {channels} channels"
+        ));
+    }
+    let original_left =
+        unsafe { endpoint.GetChannelVolumeLevelScalar(0) }.map_err(|error| error.to_string())?;
+    let result = (|| {
+        unsafe { endpoint.SetMasterVolumeLevelScalar(0.4, std::ptr::null()) }
+            .map_err(|error| format!("SetMasterVolumeLevelScalar: {error}"))?;
+        let master =
+            unsafe { endpoint.GetMasterVolumeLevelScalar() }.map_err(|error| error.to_string())?;
+        if (master - 0.4).abs() > 0.05 {
+            return Err(format!("Master volume did not change: {master}"));
+        }
+        unsafe { endpoint.SetChannelVolumeLevelScalar(0, 0.3, std::ptr::null()) }
+            .map_err(|error| format!("SetChannelVolumeLevelScalar: {error}"))?;
+        let left = unsafe { endpoint.GetChannelVolumeLevelScalar(0) }
+            .map_err(|error| error.to_string())?;
+        if (left - 0.3).abs() > 0.05 {
+            return Err(format!("Left channel volume did not change: {left}"));
+        }
+        unsafe { endpoint.SetMute(BOOL::from(true), std::ptr::null()) }
+            .map_err(|error| format!("SetMute: {error}"))?;
+        if !unsafe { endpoint.GetMute() }
+            .map_err(|error| error.to_string())?
+            .as_bool()
+        {
+            return Err("Mute control did not change".into());
+        }
+        Ok(())
+    })();
+    let _ = unsafe { endpoint.SetMute(original_mute, std::ptr::null()) };
+    let _ = unsafe { endpoint.SetChannelVolumeLevelScalar(0, original_left, std::ptr::null()) };
+    let _ = unsafe { endpoint.SetMasterVolumeLevelScalar(original_master, std::ptr::null()) };
+    result
 }
