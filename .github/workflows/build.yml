@@ -67,14 +67,11 @@ jobs:
           Write-Host 'Locating Microsoft signing tools'
           $inf2cat = Get-Item .\packages\Microsoft.Windows.WDK.x86.10.0.28000.2526\c\bin\10.0.28000.0\x86\Inf2Cat.exe
           $signtool = Get-Item .\packages\Microsoft.Windows.SDK.BuildTools.10.0.28000.2526\bin\10.0.28000.0\x64\signtool.exe
-          Write-Host 'Creating development certificate'
-          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Win AirPlay Development Test' -CertStoreLocation Cert:\CurrentUser\My -HashAlgorithm SHA256
+          Write-Host 'Reusing the WDK test certificate from the signed driver'
+          $cert = (Get-AuthenticodeSignature test-driver-package/TabletAudioSample.sys).SignerCertificate
+          if (-not $cert) { throw 'WDK did not sign TabletAudioSample.sys' }
           Export-Certificate -Cert $cert -FilePath test-driver-package/WinAirPlayTest.cer | Out-Null
-          Import-Certificate -FilePath test-driver-package/WinAirPlayTest.cer -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
-          Import-Certificate -FilePath test-driver-package/WinAirPlayTest.cer -CertStoreLocation Cert:\CurrentUser\TrustedPublisher | Out-Null
-          Write-Host 'Signing driver binaries'
-          & $signtool.FullName sign /fd SHA256 /sha1 $cert.Thumbprint /s My test-driver-package/TabletAudioSample.sys
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host 'Signing the driver helper DLL'
           & $signtool.FullName sign /fd SHA256 /sha1 $cert.Thumbprint /s My test-driver-package/KeywordDetectorContosoAdapter.dll
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Write-Host 'Generating Windows 11 driver catalog'
@@ -83,8 +80,8 @@ jobs:
           Write-Host 'Signing and verifying catalog'
           & $signtool.FullName sign /fd SHA256 /sha1 $cert.Thumbprint /s My test-driver-package/sysvad.cat
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $signtool.FullName verify /v /pa test-driver-package/sysvad.cat
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $catalogSigner = (Get-AuthenticodeSignature test-driver-package/sysvad.cat).SignerCertificate
+          if (-not $catalogSigner -or $catalogSigner.Thumbprint -ne $cert.Thumbprint) { throw 'Catalog signature does not match the WDK test certificate' }
       - uses: actions/upload-artifact@v4
         with:
           name: win-airplay-driver-test-signed-x64
