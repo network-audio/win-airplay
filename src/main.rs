@@ -209,6 +209,7 @@ fn run_manual_stream(target: SocketAddr, endpoint: Option<String>) -> Result<(),
             scalar: 0.5,
             muted: false,
         },
+        None,
     );
     while !stream.is_finished() {
         std::thread::sleep(Duration::from_millis(250));
@@ -231,6 +232,7 @@ fn run_manager() -> Result<(), String> {
         endpoint: String,
         target: SocketAddr,
         stream: Option<airplay::StreamHandle>,
+        remote_volume: Option<mpsc::Receiver<f32>>,
         last_volume: Option<airplay::Volume>,
         last_spawn: Instant,
         missed_scans: u8,
@@ -276,6 +278,7 @@ fn run_manager() -> Result<(), String> {
                         if let Some(stream) = managed.stream.take() {
                             stream.stop();
                         }
+                        managed.remote_volume = None;
                     }
                     managed.target = target;
                     continue;
@@ -290,6 +293,7 @@ fn run_manager() -> Result<(), String> {
                                 endpoint,
                                 target,
                                 stream: None,
+                                remote_volume: None,
                                 last_volume: None,
                                 last_spawn: Instant::now() - Duration::from_secs(10),
                                 missed_scans: 0,
@@ -308,6 +312,7 @@ fn run_manager() -> Result<(), String> {
                     if let Some(stream) = managed.stream.take() {
                         stream.stop();
                     }
+                    managed.remote_volume = None;
                     println!("Removed output {}", managed.endpoint);
                     false
                 }
@@ -323,6 +328,7 @@ fn run_manager() -> Result<(), String> {
                 if let Some(stream) = managed.stream.take() {
                     stream.stop();
                 }
+                managed.remote_volume = None;
                 managed.last_volume = None;
                 continue;
             }
@@ -332,6 +338,7 @@ fn run_manager() -> Result<(), String> {
                 .is_some_and(|stream| stream.is_finished())
             {
                 managed.stream = None;
+                managed.remote_volume = None;
                 managed.last_volume = None;
             }
             if managed.missed_scans < 3
@@ -339,14 +346,36 @@ fn run_manager() -> Result<(), String> {
                 && managed.last_spawn.elapsed() >= Duration::from_secs(5)
             {
                 let volume = default_output.as_ref().expect("selected output").volume;
+                let (remote_volume_tx, remote_volume_rx) = mpsc::channel();
                 managed.stream = Some(airplay::StreamHandle::start(
                     managed.target,
                     managed.endpoint.clone(),
                     volume,
+                    Some(remote_volume_tx),
                 ));
+                managed.remote_volume = Some(remote_volume_rx);
                 managed.last_volume = Some(volume);
                 managed.last_spawn = Instant::now();
             } else if let (Some(stream), Some(output)) = (&managed.stream, &default_output) {
+                let mut remote_applied = false;
+                if let Some(remote) = &managed.remote_volume {
+                    while let Ok(scalar) = remote.try_recv() {
+                        if let Err(error) =
+                            windows_audio::set_default_volume_if_name(&managed.endpoint, scalar)
+                        {
+                            eprintln!("Could not mirror speaker volume to Windows: {error}");
+                        } else {
+                            managed.last_volume = Some(airplay::Volume {
+                                scalar,
+                                muted: scalar <= 0.0,
+                            });
+                            remote_applied = true;
+                        }
+                    }
+                }
+                if remote_applied {
+                    continue;
+                }
                 let changed = managed.last_volume.is_none_or(|last| {
                     last.muted != output.volume.muted
                         || (last.scalar - output.volume.scalar).abs() >= 0.005

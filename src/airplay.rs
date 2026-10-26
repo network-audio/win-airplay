@@ -3,6 +3,7 @@ use capture::AudioSource;
 use pipeline::{PipelineMetricsTracker, DEFAULT_RING_BUFFER_PACKETS};
 use raop::ap2::session::{Ap2Config, Ap2Session};
 use std::net::SocketAddr;
+use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -33,7 +34,12 @@ pub struct StreamHandle {
 
 impl StreamHandle {
     #[cfg(windows)]
-    pub fn start(target: SocketAddr, endpoint: String, initial_volume: Volume) -> Self {
+    pub fn start(
+        target: SocketAddr,
+        endpoint: String,
+        initial_volume: Volume,
+        remote_volume: Option<Sender<f32>>,
+    ) -> Self {
         let (control, receiver) = mpsc::unbounded_channel();
         let worker = thread::spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -54,7 +60,15 @@ impl StreamHandle {
                     },
                 )
                 .map_err(|error| error.to_string())?;
-                run_session(target, Box::new(source), initial_volume, receiver, None).await
+                run_session(
+                    target,
+                    Box::new(source),
+                    initial_volume,
+                    receiver,
+                    remote_volume,
+                    None,
+                )
+                .await
             });
             if let Err(error) = result {
                 eprintln!("AirPlay stream to {target} ended: {error}");
@@ -96,6 +110,7 @@ pub fn test_tone(target: SocketAddr, duration: Duration) -> Result<(), String> {
                 muted: false,
             },
             receiver,
+            None,
             Some(duration),
         )
         .await
@@ -107,6 +122,7 @@ async fn run_session(
     source: Box<dyn AudioSource + Send>,
     volume: Volume,
     mut control: mpsc::UnboundedReceiver<Control>,
+    remote_volume: Option<Sender<f32>>,
     duration: Option<Duration>,
 ) -> Result<(), String> {
     let config = Ap2Config {
@@ -121,6 +137,7 @@ async fn run_session(
         Ap2Session::start_with_source(config, source, metrics, DEFAULT_RING_BUFFER_PACKETS)
             .await
             .map_err(|error| error.to_string())?;
+    let mut remote_commands = session.take_remote_commands();
     let mut feedback = tokio::time::interval(Duration::from_secs(2));
     feedback.tick().await;
     let deadline = duration.map(|duration| tokio::time::Instant::now() + duration);
@@ -133,6 +150,20 @@ async fn run_session(
                     }
                 }
                 Some(Control::Stop) | None => break,
+            },
+            command = async {
+                match &mut remote_commands {
+                    Some(commands) => commands.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => match command {
+                Some(raop::ap2::remote::Command::Volume(value)) => {
+                    if let Some(sender) = &remote_volume {
+                        let _ = sender.send(value.clamp(0.0, 1.0));
+                    }
+                }
+                Some(_) => {},
+                None => remote_commands = None,
             },
             _ = feedback.tick() => {
                 if let Err(error) = session.feedback().await {

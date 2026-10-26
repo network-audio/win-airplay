@@ -17,7 +17,7 @@ capture = { path = "vendor/nyx-refrain/crates/capture" }
 pipeline = { path = "vendor/nyx-refrain/crates/pipeline" }
 raop = { path = "vendor/nyx-refrain/crates/raop" }
 tokio = { version = "1.43", features = ["rt-multi-thread", "time", "sync"] }
-windows = { version = "0.58", features = ["Win32_Devices_FunctionDiscovery", "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_System_Com", "Win32_UI_Shell_PropertiesSystem"] }
+windows = { version = "0.58", features = ["Win32_Devices_FunctionDiscovery", "Win32_Foundation", "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_System_Com", "Win32_UI_Shell_PropertiesSystem"] }
 
 [dev-dependencies]
 
