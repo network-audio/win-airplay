@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $folder = Split-Path -Parent $MyInvocation.MyCommand.Path
 $tone = Join-Path $folder 'test-tone.wav'
-$log = Join-Path $env:LOCALAPPDATA 'WinAirPlay\controller.log'
+$log = Join-Path $env:LOCALAPPDATA 'WinAirPlay\controller-usbip.log'
 
 Write-Host 'Select an AirPlay output in the Windows sound picker, then press Enter.'
 Read-Host | Out-Null

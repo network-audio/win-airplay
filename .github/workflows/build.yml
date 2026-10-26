@@ -29,111 +29,7 @@ jobs:
           name: win-airplay-controller-x64
           path: target/release/win-airplay.exe
 
-  driver:
-    runs-on: windows-2025-vs2026
-    steps:
-      - uses: actions/checkout@v4
-      - uses: microsoft/setup-msbuild@v2
-      - name: Restore WDK packages
-        run: nuget restore .\packages.config -PackagesDirectory .\packages\
-      - name: Build SysVAD endpoint
-        shell: pwsh
-        run: |
-          $stampInf = Get-ChildItem .\packages -Filter stampinf.exe -Recurse | Where-Object { $_.FullName -match '\\x64\\' } | Select-Object -First 1
-          if (-not $stampInf) { throw 'stampinf.exe was not found in the restored WDK packages' }
-          Write-Host "Using stampinf.exe from $($stampInf.DirectoryName)"
-          $env:PATH = "$($stampInf.DirectoryName);$env:PATH"
-          msbuild driver/sysvad/EndpointsCommon/EndpointsCommon.vcxproj /m /p:Configuration=Release /p:Platform=x64
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          msbuild driver/sysvad/KeywordDetectorAdapter/KeywordDetectorContosoAdapter.vcxproj /m /p:Configuration=Release /p:Platform=x64 /p:ApiValidator_Enable=false
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          msbuild driver/sysvad/TabletAudioSample/TabletAudioSample.vcxproj /m /p:Configuration=Release /p:Platform=x64 /p:ApiValidator_Enable=false /p:SkipPackageVerification=true "/p:StampInfToolPath=$($stampInf.DirectoryName)"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Stage unsigned driver files
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force driver-package | Out-Null
-          Copy-Item driver/sysvad/TabletAudioSample/x64/Release/TabletAudioSample.sys driver-package/
-          Copy-Item driver/sysvad/TabletAudioSample/x64/Release/ComponentizedAudioSample.inf driver-package/
-          Copy-Item driver/sysvad/KeywordDetectorAdapter/x64/Release/KeywordDetectorContosoAdapter.dll driver-package/
-          Copy-Item driver/MICROSOFT-PUBLIC-LICENSE.txt driver-package/
-      - uses: actions/upload-artifact@v4
-        with:
-          name: win-airplay-driver-unsigned-x64
-          path: driver-package/**
-      - name: Create a test-signed development package
-        shell: pwsh
-        timeout-minutes: 10
-        run: |
-          Copy-Item driver-package test-driver-package -Recurse
-          Write-Host 'Locating Microsoft signing tools'
-          $inf2cat = Get-Item .\packages\Microsoft.Windows.WDK.x86.10.0.28000.2526\c\bin\10.0.28000.0\x86\Inf2Cat.exe
-          $signtool = Get-Item .\packages\Microsoft.Windows.SDK.BuildTools.10.0.28000.2526\bin\10.0.28000.0\x64\signtool.exe
-          Write-Host 'Reusing the WDK test certificate from the signed driver'
-          $cert = (Get-AuthenticodeSignature test-driver-package/TabletAudioSample.sys).SignerCertificate
-          if (-not $cert) { throw 'WDK did not sign TabletAudioSample.sys' }
-          Export-Certificate -Cert $cert -FilePath test-driver-package/WinAirPlayTest.cer | Out-Null
-          Write-Host 'Signing the driver helper DLL'
-          & $signtool.FullName sign /fd SHA256 /sha1 $cert.Thumbprint /s My test-driver-package/KeywordDetectorContosoAdapter.dll
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Write-Host 'Generating Windows 11 driver catalog'
-          & $inf2cat.FullName /driver:test-driver-package /os:10_NI_X64 /uselocaltime
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Write-Host 'Signing and verifying catalog'
-          & $signtool.FullName sign /fd SHA256 /sha1 $cert.Thumbprint /s My test-driver-package/sysvad.cat
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $catalogSigner = (Get-AuthenticodeSignature test-driver-package/sysvad.cat).SignerCertificate
-          if (-not $catalogSigner -or $catalogSigner.Thumbprint -ne $cert.Thumbprint) { throw 'Catalog signature does not match the WDK test certificate' }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: win-airplay-driver-test-signed-x64
-          path: test-driver-package/**
-
   installer-preview:
-    needs: [rust, driver]
-    runs-on: windows-2025
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-      - uses: actions/download-artifact@v4
-        with:
-          name: win-airplay-controller-x64
-          path: staging
-      - uses: actions/download-artifact@v4
-        with:
-          name: win-airplay-driver-test-signed-x64
-          path: staging/driver
-      - name: Stage and compile installer preview
-        shell: pwsh
-        run: |
-          Copy-Item vendor/nyx-refrain/LICENSE staging/NYX-LICENSE.txt
-          Copy-Item driver/MICROSOFT-PUBLIC-LICENSE.txt staging/
-          Copy-Item packaging/windows/install.ps1 staging/
-          Copy-Item packaging/windows/run.ps1 staging/
-          Copy-Item packaging/windows/test-playback.ps1 staging/
-          Copy-Item packaging/windows/assets/test-tone.wav staging/
-          if (-not (Get-Command makensis.exe -ErrorAction SilentlyContinue)) {
-            for ($attempt = 1; $attempt -le 3; $attempt++) {
-              choco install nsis --no-progress -y
-              if ($LASTEXITCODE -eq 0) { break }
-              if ($attempt -eq 3) { throw 'NSIS installation failed after three attempts' }
-              Start-Sleep -Seconds (10 * $attempt)
-            }
-          }
-          $nsis = (Get-Command makensis.exe -ErrorAction SilentlyContinue).Source
-          if (-not $nsis) { $nsis = 'C:\Program Files (x86)\NSIS\makensis.exe' }
-          if (-not (Test-Path $nsis)) { throw "NSIS compiler not found at $nsis" }
-          & $nsis /DVERSION=0.1.0 "/DDIST_DIR=$((Resolve-Path staging).Path)" '/DOUT_FILE=win-airplay-0.1.0-windows-x64-test-preview.exe' packaging/windows/installer.nsi
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (-not (Test-Path packaging/windows/win-airplay-0.1.0-windows-x64-test-preview.exe)) { throw 'Installer output was not created' }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: win-airplay-installer-test-preview
-          path: packaging/windows/win-airplay-0.1.0-windows-x64-test-preview.exe
-          if-no-files-found: error
-
-  usbip-installer-preview:
     needs: rust
     runs-on: windows-2025
     steps:
@@ -174,7 +70,7 @@ jobs:
           if-no-files-found: error
 
   usbip-windows-smoke:
-    if: github.ref_name == 'codex/usbip-win2-investigation'
+    if: github.ref_name == 'main' || github.ref_name == 'codex/usbip-win2-investigation'
     needs: rust
     runs-on: windows-2025
     timeout-minutes: 25
