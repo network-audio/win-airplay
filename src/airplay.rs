@@ -64,6 +64,14 @@ impl AudioSource for UsbPcmSource {
         true
     }
 
+    fn start(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // The USB endpoint starts delivering PCM while AirPlay pairing runs.
+        // Begin each new session with current Windows audio.
+        self.queue.clear();
+        self.pending.clear();
+        Ok(())
+    }
+
     fn read_chunk(
         &mut self,
         max_frames: usize,

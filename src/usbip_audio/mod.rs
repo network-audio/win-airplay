@@ -113,6 +113,11 @@ impl PcmQueue {
         }
         packets.pop_front()
     }
+
+    #[cfg(any(windows, test))]
+    pub fn clear(&self) {
+        self.packets.lock().unwrap().clear();
+    }
 }
 
 pub struct Server {
@@ -655,6 +660,17 @@ mod tests {
         }
         assert_eq!(queue.packets.lock().unwrap().len(), MAX_QUEUED_PCM_PACKETS);
         assert_eq!(queue.pop_timeout(Duration::ZERO).unwrap()[2], 4);
+    }
+
+    #[test]
+    fn clearing_stale_pcm_preserves_input_activity() {
+        let queue = PcmQueue::default();
+        queue.push(vec![100, 0, 0, 0]);
+        queue.clear();
+        assert!(!queue.has_data());
+        assert!(queue.idle_for().is_some());
+        queue.push(vec![100, 0, 1, 0]);
+        assert_eq!(queue.pop_timeout(Duration::ZERO), Some(vec![100, 0, 1, 0]));
     }
 
     #[test]
