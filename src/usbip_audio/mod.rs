@@ -86,7 +86,6 @@ impl PcmQueue {
         self.last_input.lock().unwrap().map(|time| time.elapsed())
     }
 
-    #[cfg(any(windows, test))]
     pub fn pop_timeout(&self, timeout: Duration) -> Option<Vec<u8>> {
         let mut packets = self.packets.lock().unwrap();
         if packets.is_empty() {

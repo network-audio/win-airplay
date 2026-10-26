@@ -58,6 +58,14 @@ enum Action {
     UsbipProbe {
         #[arg(long, default_value_t = 90)]
         seconds: u64,
+        #[arg(long)]
+        expect_pcm: bool,
+    },
+    /// Send a WASAPI test tone directly to a named output without selecting it.
+    #[command(hide = true)]
+    UsbipRenderTest {
+        #[arg(long)]
+        endpoint: String,
     },
 }
 
@@ -205,7 +213,10 @@ fn run(cli: Cli) -> Result<(), String> {
         }
         Action::Run => run_manager()?,
         Action::RunUsbip => run_usbip_manager()?,
-        Action::UsbipProbe { seconds } => {
+        Action::UsbipProbe {
+            seconds,
+            expect_pcm,
+        } => {
             let server = usbip_audio::Server::start(3240).map_err(|error| error.to_string())?;
             let streams = server.add("0123456789abcdef", "Win AirPlay USB Probe");
             println!(
@@ -213,8 +224,35 @@ fn run(cli: Cli) -> Result<(), String> {
                 streams.busid,
                 server.port()
             );
-            std::thread::sleep(Duration::from_secs(seconds));
+            if expect_pcm {
+                let deadline = Instant::now() + Duration::from_secs(seconds);
+                let mut received = 0;
+                while Instant::now() < deadline && received == 0 {
+                    if let Some(packet) = streams.pcm.pop_timeout(Duration::from_millis(500)) {
+                        received += packet.len();
+                    }
+                }
+                if received == 0 {
+                    return Err("No PCM reached the virtual USB audio endpoint".into());
+                }
+                println!("Received {received} PCM bytes through USB/IP");
+                std::thread::sleep(Duration::from_secs(5));
+            } else {
+                std::thread::sleep(Duration::from_secs(seconds));
+            }
             server.remove(&streams.busid);
+        }
+        Action::UsbipRenderTest { endpoint } => {
+            #[cfg(windows)]
+            {
+                windows_audio::initialize()?;
+                windows_audio::play_test_tone(&endpoint, Duration::from_secs(3))?;
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = endpoint;
+                return Err("WASAPI render testing requires Windows".into());
+            }
         }
     }
     Ok(())
