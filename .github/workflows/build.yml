@@ -61,20 +61,26 @@ jobs:
           path: driver-package/**
       - name: Create a test-signed development package
         shell: pwsh
+        timeout-minutes: 10
         run: |
           Copy-Item driver-package test-driver-package -Recurse
+          Write-Host 'Locating Microsoft signing tools'
           $inf2cat = Get-Item .\packages\Microsoft.Windows.WDK.x86.10.0.28000.2526\c\bin\10.0.28000.0\x86\Inf2Cat.exe
           $signtool = Get-Item .\packages\Microsoft.Windows.SDK.BuildTools.10.0.28000.2526\bin\10.0.28000.0\x64\signtool.exe
+          Write-Host 'Creating development certificate'
           $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Win AirPlay Development Test' -CertStoreLocation Cert:\CurrentUser\My -HashAlgorithm SHA256
           Export-Certificate -Cert $cert -FilePath test-driver-package/WinAirPlayTest.cer | Out-Null
           Import-Certificate -FilePath test-driver-package/WinAirPlayTest.cer -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
           Import-Certificate -FilePath test-driver-package/WinAirPlayTest.cer -CertStoreLocation Cert:\CurrentUser\TrustedPublisher | Out-Null
+          Write-Host 'Signing driver binaries'
           & $signtool.FullName sign /fd SHA256 /sha1 $cert.Thumbprint /s My test-driver-package/TabletAudioSample.sys
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $signtool.FullName sign /fd SHA256 /sha1 $cert.Thumbprint /s My test-driver-package/KeywordDetectorContosoAdapter.dll
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $inf2cat.FullName /driver:test-driver-package /os:10_NI_X64,10_GE_X64,10_25H2_X64 /uselocaltime
+          Write-Host 'Generating Windows 11 driver catalog'
+          & $inf2cat.FullName /driver:test-driver-package /os:10_NI_X64 /uselocaltime
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host 'Signing and verifying catalog'
           & $signtool.FullName sign /fd SHA256 /sha1 $cert.Thumbprint /s My test-driver-package/sysvad.cat
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $signtool.FullName verify /v /pa test-driver-package/sysvad.cat
