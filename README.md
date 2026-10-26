@@ -11,6 +11,8 @@ An early Windows AirPlay 2 output project. The Rust controller discovers local r
 - The virtual endpoint source is adapted from Microsoft's [SysVAD sample](https://github.com/microsoft/Windows-driver-samples/tree/main/audio/sysvad), licensed under the Microsoft Public License in `driver/MICROSOFT-PUBLIC-LICENSE.txt`. It currently exposes one render endpoint called **Win AirPlay**, rather than a separate endpoint for each discovered speaker.
 - The endpoint package is a development driver. GitHub Actions can build it, but Windows requires signing and installation on a test PC. The CI runner cannot verify endpoint enumeration, loopback capture, or actual playback.
 
+The Actions artifact `win-airplay-driver-unsigned-x64` contains the `.sys`, base `.inf`, helper `.dll`, and source license. It has no signed catalog and cannot be installed as a normal Windows driver package. Generate and sign a catalog before deployment to a Windows test PC.
+
 The driver CI build disables WDK API and INF verification because the restored x64 NuGet kit does not include the x86 validator components those tasks invoke. These checks and signing remain required before distribution.
 
 The AirPlay sender is an external program and is not bundled here. Install/build `nyxr` from Nyx Refrain and put it on `PATH`, or pass `--sender C:\\path\\to\\nyxr.exe`. Its source is MIT licensed. The controller launches `nyxr` as a child process, so its AirPlay pairing store and device compatibility follow Nyx Refrain.

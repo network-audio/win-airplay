@@ -47,10 +47,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           msbuild driver/sysvad/TabletAudioSample/TabletAudioSample.vcxproj /m /p:Configuration=Release /p:Platform=x64 /p:ApiValidator_Enable=false /p:SkipPackageVerification=true "/p:StampInfToolPath=$($stampInf.DirectoryName)"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Stage unsigned driver files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force driver-package | Out-Null
+          Copy-Item driver/sysvad/TabletAudioSample/x64/Release/TabletAudioSample.sys driver-package/
+          Copy-Item driver/sysvad/TabletAudioSample/x64/Release/ComponentizedAudioSample.inf driver-package/
+          Copy-Item driver/sysvad/KeywordDetectorAdapter/x64/Release/KeywordDetectorContosoAdapter.dll driver-package/
+          Copy-Item driver/MICROSOFT-PUBLIC-LICENSE.txt driver-package/
       - uses: actions/upload-artifact@v4
         with:
           name: win-airplay-driver-unsigned-x64
-          path: |
-            driver/sysvad/TabletAudioSample/x64/Release/**
-            driver/sysvad/KeywordDetectorAdapter/x64/Release/**
+          path: driver-package/**
 
