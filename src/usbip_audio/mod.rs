@@ -264,6 +264,10 @@ fn serve_client(
     devices: &Arc<RwLock<BTreeMap<String, Arc<Device>>>>,
     stop: &AtomicBool,
 ) -> io::Result<()> {
+    // On Windows, accepted sockets can retain the listener's nonblocking mode.
+    // A read with no USB request would then return WouldBlock immediately and
+    // spin one core per attached speaker.
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_millis(500)))?;
     stream.set_nodelay(true)?;
     let mut preamble = [0; 8];
@@ -328,9 +332,12 @@ fn read_exact_active(
         match stream.read(&mut bytes[offset..]) {
             Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
             Ok(count) => offset += count,
-            Err(error)
-                if error.kind() == io::ErrorKind::WouldBlock
-                    || error.kind() == io::ErrorKind::TimedOut => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                // Keep the loop bounded even if a socket unexpectedly becomes
+                // nonblocking after it was accepted.
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
             Err(error) => return Err(error),
         }
     }
