@@ -126,7 +126,6 @@ pub struct Server {
 impl Server {
     pub fn start(port: u16) -> io::Result<Self> {
         let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))?;
-        listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
         let devices: Arc<RwLock<BTreeMap<String, Arc<Device>>>> =
             Arc::new(RwLock::new(BTreeMap::new()));
@@ -139,6 +138,9 @@ impl Server {
                 while !worker_stop.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((stream, _)) => {
+                            if worker_stop.load(Ordering::Acquire) {
+                                break;
+                            }
                             let devices = worker_devices.clone();
                             let stop = worker_stop.clone();
                             let _ = thread::Builder::new()
@@ -154,10 +156,10 @@ impl Server {
                                     }
                                 });
                         }
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(30))
+                        Err(error) => {
+                            eprintln!("USB/IP accept failed: {error}");
+                            thread::sleep(Duration::from_millis(100));
                         }
-                        Err(error) => eprintln!("USB/IP accept failed: {error}"),
                     }
                 }
             })?;
@@ -205,6 +207,8 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        // Wake the blocking accept so shutdown can join the listener promptly.
+        let _ = TcpStream::connect((Ipv4Addr::LOCALHOST, self.port));
         if let Some(worker) = self.listener.take() {
             let _ = worker.join();
         }
@@ -264,9 +268,7 @@ fn serve_client(
     devices: &Arc<RwLock<BTreeMap<String, Arc<Device>>>>,
     stop: &AtomicBool,
 ) -> io::Result<()> {
-    // On Windows, accepted sockets can retain the listener's nonblocking mode.
-    // A read with no USB request would then return WouldBlock immediately and
-    // spin one core per attached speaker.
+    // Keep client reads blocking even if the listener mode changes later.
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_millis(500)))?;
     stream.set_nodelay(true)?;

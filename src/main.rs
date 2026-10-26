@@ -740,7 +740,9 @@ fn run_usbip_manager() -> Result<(), String> {
                     stream.set_channel_gains(volume.channels.to_vec());
                 }
             }
-            if check_volume || volume_changed {
+            // Refresh the slider when a stream starts. Polling every idle
+            // endpoint creates COM work even when nothing is playing.
+            if managed.stream.is_some() && (check_volume || volume_changed) {
                 if let Ok(volume) = windows_audio::render_output_volume(&managed.endpoint) {
                     if (managed.slider_volume.scalar - volume.scalar).abs() >= 0.005
                         || managed.slider_volume.muted != volume.muted
