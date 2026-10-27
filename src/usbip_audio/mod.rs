@@ -1,5 +1,5 @@
 //! One virtual USB Audio 1.0 speaker per receiver, served over USB/IP by the shared
-//! [usbip-audio](https://github.com/stakach/usbip-audio) crate.
+//! [usbip-audio](https://github.com/network-audio/usbip-audio) crate.
 
 use std::collections::VecDeque;
 use std::io;
