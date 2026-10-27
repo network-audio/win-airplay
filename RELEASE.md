@@ -1,4 +1,4 @@
-Win AirPlay adds each discovered AirPlay 2 speaker to the Windows sound output picker. Select a speaker to play Windows audio through it. Volume and mute are available from Windows sound controls.
+Win AirPlay adds discovered AirPlay 2 speakers to the Windows sound output picker. This update refreshes speaker discovery when the laptop changes networks and retries when no speakers remain reachable.
 
 Download the installer for your Windows architecture (x64 or ARM64) below, run it, and approve the administrator prompt. The installer bundles the Win AirPlay controller and USBip client. It starts the controller at sign-in; no separate Nyx installation is needed. Restart Windows if prompted.
 

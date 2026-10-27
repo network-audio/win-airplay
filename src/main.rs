@@ -735,6 +735,21 @@ fn usbip_detach(port: u32) {
 }
 
 #[cfg(windows)]
+fn network_addresses() -> Option<Vec<(String, IpAddr)>> {
+    let mut addresses: Vec<_> = if_addrs::get_if_addrs()
+        .ok()?
+        .into_iter()
+        .filter(|interface| !interface.is_loopback() && interface.ip().is_ipv4())
+        .map(|interface| {
+            let ip = interface.ip();
+            (interface.name, ip)
+        })
+        .collect();
+    addresses.sort();
+    Some(addresses)
+}
+
+#[cfg(windows)]
 fn run_usbip_manager() -> Result<(), String> {
     use std::sync::mpsc;
     use std::sync::Arc;
@@ -763,110 +778,153 @@ fn run_usbip_manager() -> Result<(), String> {
         usbip_audio::Server::start(3240).map_err(|error| format!("USB/IP server: {error}"))?;
     let (discovery_tx, discovery_rx) = mpsc::channel();
     std::thread::spawn(move || {
-        // Keep one mDNS browser alive so a speaker remains known between
-        // announcements. Recreating a browser for every scan produced empty
-        // snapshots and detached every Windows output at once.
-        let mdns = match ServiceDaemon::new() {
-            Ok(mdns) => mdns,
-            Err(error) => {
-                eprintln!("AirPlay discovery failed: {error}");
-                return;
-            }
-        };
-        let browser = match mdns.browse(SERVICE_TYPES[0]) {
-            Ok(browser) => browser,
-            Err(error) => {
-                eprintln!("AirPlay browse failed: {error}");
-                return;
-            }
-        };
-        let raop_browser = match mdns.browse(SERVICE_TYPES[1]) {
-            Ok(browser) => Some(browser),
-            Err(error) => {
-                eprintln!("RAOP codec discovery unavailable: {error}");
-                None
-            }
-        };
-        let mut known: BTreeMap<String, Vec<Speaker>> = BTreeMap::new();
-        let mut known_raop: BTreeMap<String, Vec<(IpAddr, Vec<u8>)>> = BTreeMap::new();
-        let mut next_report = Instant::now();
         loop {
-            match browser.recv_timeout(Duration::from_millis(100)) {
-                Ok(ServiceEvent::ServiceResolved(info)) => {
-                    let fullname = info.get_fullname().to_owned();
-                    let name = instance_name(&fullname, SERVICE_TYPES[0]);
-                    let speakers = info
-                        .get_addresses()
-                        .iter()
-                        .copied()
-                        .filter(|address| address.is_ipv4())
-                        .map(|address| Speaker {
-                            name: name.clone(),
-                            address,
-                            port: info.get_port(),
-                            service: SERVICE_TYPES[0].to_owned(),
-                            model: info.get_property_val_str("model").map(str::to_owned),
-                            device_id: info.get_property_val_str("deviceid").map(str::to_owned),
-                            codecs: parse_codecs(info.get_property_val_str("cn")),
-                            low_latency_audio: probe_low_latency_audio(address, info.get_port()),
-                        })
-                        .collect();
-                    known.insert(fullname, speakers);
+            // Keep one browser alive while the network is stable. A new browser
+            // starts a fresh multicast query after a network change.
+            let mut addresses = network_addresses();
+            let mdns = match ServiceDaemon::new() {
+                Ok(mdns) => mdns,
+                Err(error) => {
+                    eprintln!("AirPlay discovery failed: {error}; retrying");
+                    let _ = discovery_tx.send(Vec::new());
+                    std::thread::sleep(Duration::from_secs(5));
+                    continue;
                 }
-                Ok(ServiceEvent::ServiceRemoved(_, fullname)) => {
-                    known.remove(&fullname);
+            };
+            let browser = match mdns.browse(SERVICE_TYPES[0]) {
+                Ok(browser) => browser,
+                Err(error) => {
+                    eprintln!("AirPlay browse failed: {error}; retrying");
+                    let _ = mdns.shutdown();
+                    let _ = discovery_tx.send(Vec::new());
+                    std::thread::sleep(Duration::from_secs(5));
+                    continue;
                 }
-                _ => {}
-            }
-            if let Some(raop_browser) = &raop_browser {
-                match raop_browser.recv_timeout(Duration::from_millis(50)) {
+            };
+            let raop_browser = match mdns.browse(SERVICE_TYPES[1]) {
+                Ok(browser) => Some(browser),
+                Err(error) => {
+                    eprintln!("RAOP codec discovery unavailable: {error}");
+                    None
+                }
+            };
+            let mut known: BTreeMap<String, Vec<Speaker>> = BTreeMap::new();
+            let mut known_raop: BTreeMap<String, Vec<(IpAddr, Vec<u8>)>> = BTreeMap::new();
+            let mut next_report = Instant::now();
+            let mut empty_since: Option<Instant> = None;
+            loop {
+                match browser.recv_timeout(Duration::from_millis(100)) {
                     Ok(ServiceEvent::ServiceResolved(info)) => {
-                        let codecs = parse_codecs(info.get_property_val_str("cn"));
-                        let addresses = info
+                        let fullname = info.get_fullname().to_owned();
+                        let name = instance_name(&fullname, SERVICE_TYPES[0]);
+                        let speakers = info
                             .get_addresses()
                             .iter()
                             .copied()
                             .filter(|address| address.is_ipv4())
-                            .map(|address| (address, codecs.clone()))
+                            .map(|address| Speaker {
+                                name: name.clone(),
+                                address,
+                                port: info.get_port(),
+                                service: SERVICE_TYPES[0].to_owned(),
+                                model: info.get_property_val_str("model").map(str::to_owned),
+                                device_id: info.get_property_val_str("deviceid").map(str::to_owned),
+                                codecs: parse_codecs(info.get_property_val_str("cn")),
+                                low_latency_audio: probe_low_latency_audio(
+                                    address,
+                                    info.get_port(),
+                                ),
+                            })
                             .collect();
-                        known_raop.insert(info.get_fullname().to_owned(), addresses);
+                        known.insert(fullname, speakers);
                     }
                     Ok(ServiceEvent::ServiceRemoved(_, fullname)) => {
-                        known_raop.remove(&fullname);
+                        known.remove(&fullname);
                     }
                     _ => {}
                 }
-            }
-            if Instant::now() >= next_report {
-                let raop_codecs: BTreeMap<IpAddr, Vec<u8>> =
-                    known_raop.values().flatten().cloned().collect();
-                let reachable: Vec<Speaker> = known
-                    .values()
-                    .flatten()
-                    .map(|speaker| {
-                        let mut speaker = speaker.clone();
-                        if speaker.codecs.is_empty() {
-                            if let Some(codecs) = raop_codecs.get(&speaker.address) {
-                                speaker.codecs = codecs.clone();
-                            }
+                if let Some(raop_browser) = &raop_browser {
+                    match raop_browser.recv_timeout(Duration::from_millis(50)) {
+                        Ok(ServiceEvent::ServiceResolved(info)) => {
+                            let codecs = parse_codecs(info.get_property_val_str("cn"));
+                            let addresses = info
+                                .get_addresses()
+                                .iter()
+                                .copied()
+                                .filter(|address| address.is_ipv4())
+                                .map(|address| (address, codecs.clone()))
+                                .collect();
+                            known_raop.insert(info.get_fullname().to_owned(), addresses);
                         }
-                        speaker
-                    })
-                    .filter(|speaker| {
-                        std::net::TcpStream::connect_timeout(
-                            &SocketAddr::new(speaker.address, speaker.port),
-                            Duration::from_millis(400),
-                        )
-                        .is_ok()
-                    })
-                    .collect();
-                if discovery_tx.send(reachable).is_err() {
+                        Ok(ServiceEvent::ServiceRemoved(_, fullname)) => {
+                            known_raop.remove(&fullname);
+                        }
+                        _ => {}
+                    }
+                }
+                if browser.is_disconnected()
+                    || raop_browser
+                        .as_ref()
+                        .is_some_and(|receiver| receiver.is_disconnected())
+                {
+                    eprintln!("AirPlay discovery browser disconnected; restarting");
                     break;
                 }
-                next_report = Instant::now() + Duration::from_secs(5);
+                if Instant::now() >= next_report {
+                    if let Some(current) = network_addresses() {
+                        if addresses
+                            .as_ref()
+                            .is_some_and(|previous| previous != &current)
+                        {
+                            eprintln!(
+                                "Windows network addresses changed; restarting AirPlay discovery"
+                            );
+                            break;
+                        }
+                        addresses = Some(current);
+                    }
+                    let raop_codecs: BTreeMap<IpAddr, Vec<u8>> =
+                        known_raop.values().flatten().cloned().collect();
+                    let reachable: Vec<Speaker> = known
+                        .values()
+                        .flatten()
+                        .map(|speaker| {
+                            let mut speaker = speaker.clone();
+                            if speaker.codecs.is_empty() {
+                                if let Some(codecs) = raop_codecs.get(&speaker.address) {
+                                    speaker.codecs = codecs.clone();
+                                }
+                            }
+                            speaker
+                        })
+                        .filter(|speaker| {
+                            std::net::TcpStream::connect_timeout(
+                                &SocketAddr::new(speaker.address, speaker.port),
+                                Duration::from_millis(400),
+                            )
+                            .is_ok()
+                        })
+                        .collect();
+                    let no_speakers = reachable.is_empty();
+                    if discovery_tx.send(reachable).is_err() {
+                        let _ = mdns.shutdown();
+                        return;
+                    }
+                    if no_speakers {
+                        let since = empty_since.get_or_insert_with(Instant::now);
+                        if since.elapsed() >= Duration::from_secs(10) {
+                            eprintln!("No reachable AirPlay speakers; refreshing discovery");
+                            break;
+                        }
+                    } else {
+                        empty_since = None;
+                    }
+                    next_report = Instant::now() + Duration::from_secs(5);
+                }
             }
+            let _ = mdns.shutdown();
+            std::thread::sleep(Duration::from_millis(500));
         }
-        let _ = mdns.shutdown();
     });
     let mut active: BTreeMap<String, Managed> = BTreeMap::new();
     let mut last_volume_check = Instant::now() - Duration::from_secs(1);

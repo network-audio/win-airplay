@@ -1,6 +1,6 @@
 [package]
 name = "win-airplay"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 license = "MIT"
 description = "AirPlay 2 discovery and Windows audio sender controller"
@@ -15,6 +15,7 @@ sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 capture = { path = "vendor/nyx-refrain/crates/capture" }
+if-addrs = "0.13"
 pipeline = { path = "vendor/nyx-refrain/crates/pipeline" }
 raop = { path = "vendor/nyx-refrain/crates/raop" }
 tokio = { version = "1.43", features = ["rt-multi-thread", "time", "sync"] }
