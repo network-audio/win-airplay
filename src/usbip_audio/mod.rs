@@ -126,8 +126,12 @@ impl Server {
             serial: key.to_owned(),
             delay_ms,
         };
-        let streams = SpeakerStreams { pcm: pcm.clone(), volume_events };
-        self.inner.add(&busid, Arc::new(Uac1Speaker::new(config, streams)));
+        let streams = SpeakerStreams {
+            pcm: pcm.clone(),
+            volume_events,
+        };
+        self.inner
+            .add(&busid, Arc::new(Uac1Speaker::new(config, streams)));
         DeviceStreams { busid, pcm, volume }
     }
 
