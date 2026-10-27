@@ -76,6 +76,12 @@ enum Action {
         #[arg(long)]
         endpoint: String,
     },
+    /// Report the latency Windows exposes for a virtual USB output.
+    #[command(hide = true)]
+    UsbipLatencyTest {
+        #[arg(long)]
+        endpoint: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -126,6 +132,17 @@ impl StreamProfile {
             180
         } else {
             0
+        }
+    }
+
+    fn reported_delay_ms(self) -> u8 {
+        // USB Audio 1.0 bDelay uses 1 ms USB frames and cannot exceed 255.
+        // Report the network packet lead for low-latency receivers and the
+        // advertised sync latency for receivers with a longer playout buffer.
+        if self.latency_frames < 0 {
+            self.prefill_ms().min(u8::MAX as u32) as u8
+        } else {
+            ((self.latency_frames as u32 * 1_000) / 44_100).min(u8::MAX as u32) as u8
         }
     }
 }
@@ -392,9 +409,9 @@ fn run(cli: Cli) -> Result<(), String> {
             two_speakers,
         } => {
             let server = usbip_audio::Server::start(3240).map_err(|error| error.to_string())?;
-            let streams = server.add("0123456789abcdef", "Win AirPlay USB Probe");
-            let second =
-                two_speakers.then(|| server.add("fedcba9876543210", "Win AirPlay USB Probe Two"));
+            let streams = server.add("0123456789abcdef", "Win AirPlay USB Probe", 180);
+            let second = two_speakers
+                .then(|| server.add("fedcba9876543210", "Win AirPlay USB Probe Two", 255));
             println!(
                 "USB/IP probe busid={} port={}",
                 streams.busid,
@@ -464,6 +481,19 @@ fn run(cli: Cli) -> Result<(), String> {
             {
                 let _ = endpoint;
                 return Err("Windows endpoint control testing requires Windows".into());
+            }
+        }
+        Action::UsbipLatencyTest { endpoint } => {
+            #[cfg(windows)]
+            {
+                windows_audio::initialize()?;
+                let latency_ms = windows_audio::render_stream_latency_ms(&endpoint)?;
+                println!("Windows stream latency {endpoint}: {latency_ms:.1} ms");
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = endpoint;
+                return Err("Windows latency testing requires Windows".into());
             }
         }
     }
@@ -951,7 +981,7 @@ fn run_usbip_manager() -> Result<(), String> {
                     continue;
                 }
                 let endpoint = endpoint_name(&speaker);
-                let streams = server.add(&key, &endpoint);
+                let streams = server.add(&key, &endpoint, profile.reported_delay_ms());
                 let port = match usbip_attach(server.port(), &streams.busid) {
                     Ok(port) => Some(port),
                     Err(error) => {
@@ -1211,6 +1241,7 @@ mod tests {
         assert_eq!(speaker.stream_profile().latency_frames, -1_764);
         assert_eq!(speaker.stream_profile().start_lead_ms, 1_250);
         assert_eq!(speaker.stream_profile().prefill_ms(), 180);
+        assert_eq!(speaker.stream_profile().reported_delay_ms(), 180);
         speaker.codecs = vec![0];
         assert_eq!(speaker.stream_profile().encoding, AudioEncoding::Pcm);
         speaker.low_latency_audio = false;
@@ -1222,6 +1253,7 @@ mod tests {
         );
         assert_eq!(speaker.stream_profile().latency_frames, 66_150);
         assert_eq!(speaker.stream_profile().prefill_ms(), 0);
+        assert_eq!(speaker.stream_profile().reported_delay_ms(), 255);
         speaker.model = Some("Another model".into());
         speaker.codecs.clear();
         assert_eq!(speaker.stream_profile(), StreamProfile::default());

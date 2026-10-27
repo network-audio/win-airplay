@@ -235,6 +235,10 @@ jobs:
               if ($LASTEXITCODE -ne 0) { throw 'WASAPI render to second virtual USB output failed' }
               & .\probe\win-airplay.exe usbip-controls-test --endpoint 'Win AirPlay USB Probe'
               if ($LASTEXITCODE -ne 0) { throw 'Windows endpoint volume or mute test failed' }
+              & .\probe\win-airplay.exe usbip-latency-test --endpoint 'Win AirPlay USB Probe'
+              if ($LASTEXITCODE -ne 0) { throw 'Windows latency query failed for the 180 ms descriptor' }
+              & .\probe\win-airplay.exe usbip-latency-test --endpoint 'Win AirPlay USB Probe Two'
+              if ($LASTEXITCODE -ne 0) { throw 'Windows latency query failed for the 255 ms descriptor' }
               if (-not $probe.WaitForExit(65000)) { throw 'USB/IP probe did not finish' }
               if ($probe.ExitCode -ne 0) { throw "USB/IP probe received no PCM (exit $($probe.ExitCode))" }
               if (Select-String -Path probe-err.log -Pattern 'USB/IP URB failed: ep=1' -Quiet) {

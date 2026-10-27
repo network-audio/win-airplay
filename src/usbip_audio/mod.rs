@@ -41,6 +41,7 @@ struct Device {
     devnum: u32,
     name: String,
     serial: String,
+    delay_ms: u8,
     active: AtomicBool,
     state: Mutex<DeviceState>,
     pcm: Arc<PcmQueue>,
@@ -181,7 +182,7 @@ impl Server {
         self.port
     }
 
-    pub fn add(&self, key: &str, name: &str) -> DeviceStreams {
+    pub fn add(&self, key: &str, name: &str, delay_ms: u8) -> DeviceStreams {
         let busid = format!("1-{}", &key[..key.len().min(16)]);
         let devnum = self.next_devnum.fetch_add(1, Ordering::Relaxed);
         let pcm = Arc::new(PcmQueue::default());
@@ -191,6 +192,7 @@ impl Server {
             devnum,
             name: name.to_owned(),
             serial: key.to_owned(),
+            delay_ms,
             active: AtomicBool::new(true),
             state: Mutex::new(DeviceState::default()),
             pcm: pcm.clone(),
@@ -511,7 +513,7 @@ fn control(device: &Device, setup: [u8; 8], payload: &[u8]) -> Result<Vec<u8>, i
         (0x80, 6) => {
             let descriptor = match (value >> 8) as u8 {
                 1 => device_descriptor(),
-                2 => configuration_descriptor(),
+                2 => configuration_descriptor(device.delay_ms),
                 3 => string_descriptor(device, value as u8)?,
                 _ => return Err(EPIPE),
             };
@@ -585,7 +587,7 @@ fn device_descriptor() -> Vec<u8> {
     ]
 }
 
-fn configuration_descriptor() -> Vec<u8> {
+fn configuration_descriptor(delay_ms: u8) -> Vec<u8> {
     let mut out = vec![
         9, 2, 0, 0, 2, 1, 0, 0x80, 50, // configuration
         9, 4, 0, 0, 0, 1, 1, 0, 0, // AudioControl interface
@@ -595,7 +597,7 @@ fn configuration_descriptor() -> Vec<u8> {
         9, 0x24, 3, 3, 0x01, 0x03, 0, 2, 0, // speaker output terminal
         9, 4, 1, 0, 0, 1, 2, 0, 0, // AudioStreaming alt 0
         9, 4, 1, 1, 1, 1, 2, 0, 0, // AudioStreaming alt 1
-        7, 0x24, 1, 1, 1, 1, 0, // AS general, PCM
+        7, 0x24, 1, 1, delay_ms, 1, 0, // AS general, PCM; bDelay is USB frames (ms)
         11, 0x24, 2, 1, 2, 2, 16, 1, 0x44, 0xac, 0, // 44.1 kHz stereo 16-bit
         9, 5, 1, 0x0d, 180, 0, 1, 0, 0, // synchronous isochronous OUT
         7, 0x25, 1, 0, 0, 0, 0, // class-specific endpoint
@@ -675,7 +677,8 @@ mod tests {
 
     #[test]
     fn descriptors_are_well_formed() {
-        let config = configuration_descriptor();
+        let config = configuration_descriptor(180);
+        assert_eq!(&config[76..83], &[7, 0x24, 1, 1, 180, 1, 0]);
         assert_eq!(
             u16::from_le_bytes([config[2], config[3]]) as usize,
             config.len()
@@ -692,7 +695,7 @@ mod tests {
     #[test]
     fn device_list_and_import_are_protocol_sized() {
         let server = Server::start(0).unwrap();
-        let streams = server.add("0123456789abcdef", "Kitchen");
+        let streams = server.add("0123456789abcdef", "Kitchen", 180);
         let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, server.port())).unwrap();
         client.write_all(&[1, 0x11, 0x80, 5, 0, 0, 0, 0]).unwrap();
         let mut header = [0; 12];
@@ -715,7 +718,7 @@ mod tests {
     #[test]
     fn control_volume_and_iso_pcm_round_trip() {
         let server = Server::start(0).unwrap();
-        let streams = server.add("0123456789abcdef", "Kitchen");
+        let streams = server.add("0123456789abcdef", "Kitchen", 180);
         let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, server.port())).unwrap();
         client
             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -734,10 +737,10 @@ mod tests {
         client.read_exact(&mut reply).unwrap();
         assert_eq!(be32(&reply[20..24]), 0);
         let length = be32(&reply[24..28]) as usize;
-        assert_eq!(length, configuration_descriptor().len());
+        assert_eq!(length, configuration_descriptor(180).len());
         let mut config = vec![0; length];
         client.read_exact(&mut config).unwrap();
-        assert_eq!(config, configuration_descriptor());
+        assert_eq!(config, configuration_descriptor(180));
         for (sequence, setup) in [[0, 9, 1, 0, 0, 0, 0, 0], [1, 11, 1, 0, 1, 0, 0, 0]]
             .into_iter()
             .enumerate()

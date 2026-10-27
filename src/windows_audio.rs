@@ -104,6 +104,26 @@ pub fn render_output_volume(expected_name: &str) -> Result<crate::airplay::Volum
     Ok(crate::airplay::Volume { scalar, muted })
 }
 
+/// Diagnostic value exposed by WASAPI for an initialized render stream.
+pub fn render_stream_latency_ms(expected_name: &str) -> Result<f64, String> {
+    let device = named_render_output(expected_name)?;
+    let client: IAudioClient =
+        unsafe { device.Activate(CLSCTX_ALL, None) }.map_err(|error| error.to_string())?;
+    let format = WAVEFORMATEX {
+        wFormatTag: 1,
+        nChannels: 2,
+        nSamplesPerSec: 44_100,
+        nAvgBytesPerSec: 44_100 * 4,
+        nBlockAlign: 4,
+        wBitsPerSample: 16,
+        cbSize: 0,
+    };
+    unsafe { client.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 500_000, 0, &format, None) }
+        .map_err(|error| format!("WASAPI initialization failed: {error}"))?;
+    let latency = unsafe { client.GetStreamLatency() }.map_err(|error| error.to_string())?;
+    Ok(latency as f64 / 10_000.0)
+}
+
 /// Render through a named endpoint without changing the system default output.
 pub fn play_test_tone(expected_name: &str, duration: std::time::Duration) -> Result<(), String> {
     let device = named_render_output(expected_name)?;
