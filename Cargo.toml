@@ -12,6 +12,7 @@ plist = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+usbip-audio = { git = "https://github.com/stakach/usbip-audio", rev = "bcdb0dbfb504a020c37b70fb26ce34b0c3c4fe02" }
 
 [target.'cfg(windows)'.dependencies]
 capture = { path = "vendor/nyx-refrain/crates/capture" }

@@ -1,59 +1,22 @@
-//! A loopback-only USB/IP server exporting one USB Audio 1.0 speaker per receiver.
-//! The USB/IP framing follows https://www.kernel.org/doc/html/latest/usb/usbip_protocol.html.
+//! One virtual USB Audio 1.0 speaker per receiver, served over USB/IP by the shared
+//! [usbip-audio](https://github.com/stakach/usbip-audio) crate.
 
-use std::collections::{BTreeMap, VecDeque};
-use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::collections::VecDeque;
+use std::io;
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
-use std::thread;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use std::time::Instant;
+use usbip_audio::uac1::{Uac1Speaker, Uac1SpeakerConfig, Uac1SpeakerStreams};
+use usbip_audio::MonotonicClock;
 
-const VERSION: u16 = 0x0111;
-const MAX_TRANSFER: usize = 1024 * 1024;
-const MAX_ISO_PACKETS: usize = 1024;
+pub use usbip_audio::uac1::Volume;
+
 const MAX_QUEUED_PCM_PACKETS: usize = 24;
 const ACTIVITY_SAMPLE_THRESHOLD: i16 = 64;
-const EPIPE: i32 = -32;
-static URB_ERRORS_LOGGED: AtomicU32 = AtomicU32::new(0);
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Volume {
-    pub scalar: f32,
-    pub muted: bool,
-    pub channels: [f32; 2],
-}
-
-impl Default for Volume {
-    fn default() -> Self {
-        Self {
-            scalar: 0.5,
-            muted: false,
-            channels: [1.0, 1.0],
-        }
-    }
-}
-
-struct Device {
-    busid: String,
-    devnum: u32,
-    name: String,
-    serial: String,
-    delay_ms: u8,
-    active: AtomicBool,
-    state: Mutex<DeviceState>,
-    pcm: Arc<PcmQueue>,
-    volume_events: SyncSender<Volume>,
-}
-
-#[derive(Default)]
-struct DeviceState {
-    configuration: u8,
-    alternate: u8,
-    volume: Volume,
-}
+/// Prototype id; production requires an assigned VID/PID
+const VENDOR_ID: u16 = 0xcafe;
+const PRODUCT_ID: u16 = 0x4001;
 
 #[cfg_attr(not(windows), allow(dead_code))]
 pub struct DeviceStreams {
@@ -121,526 +84,75 @@ impl PcmQueue {
     }
 }
 
+struct SpeakerStreams {
+    pcm: Arc<PcmQueue>,
+    volume_events: SyncSender<Volume>,
+}
+
+impl Uac1SpeakerStreams for SpeakerStreams {
+    fn pcm(&self, data: &[u8]) {
+        self.pcm.push(data.to_vec());
+    }
+    fn volume(&self, volume: Volume) {
+        let _ = self.volume_events.try_send(volume);
+    }
+}
+
 pub struct Server {
-    devices: Arc<RwLock<BTreeMap<String, Arc<Device>>>>,
-    stop: Arc<AtomicBool>,
-    listener: Option<thread::JoinHandle<()>>,
-    port: u16,
-    next_devnum: AtomicU32,
+    inner: usbip_audio::Server,
 }
 
 impl Server {
+    /// Listens on `port` of the loopback interface, 0 for any free port, so that other applications using
+    /// the usbip-win2 driver can run their own servers alongside.
     pub fn start(port: u16) -> io::Result<Self> {
-        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))?;
-        let port = listener.local_addr()?.port();
-        let devices: Arc<RwLock<BTreeMap<String, Arc<Device>>>> =
-            Arc::new(RwLock::new(BTreeMap::new()));
-        let stop = Arc::new(AtomicBool::new(false));
-        let worker_devices = devices.clone();
-        let worker_stop = stop.clone();
-        let worker = thread::Builder::new()
-            .name("airplay-usbip".into())
-            .spawn(move || {
-                while !worker_stop.load(Ordering::Relaxed) {
-                    match listener.accept() {
-                        Ok((stream, _)) => {
-                            if worker_stop.load(Ordering::Acquire) {
-                                break;
-                            }
-                            let devices = worker_devices.clone();
-                            let stop = worker_stop.clone();
-                            let _ = thread::Builder::new()
-                                .name("airplay-usbip-client".into())
-                                .spawn(move || {
-                                    if let Err(error) = serve_client(stream, &devices, &stop) {
-                                        if error.kind() != io::ErrorKind::UnexpectedEof
-                                            && error.kind() != io::ErrorKind::ConnectionReset
-                                            && error.kind() != io::ErrorKind::ConnectionAborted
-                                        {
-                                            eprintln!("USB/IP client ended: {error}");
-                                        }
-                                    }
-                                });
-                        }
-                        Err(error) => {
-                            eprintln!("USB/IP accept failed: {error}");
-                            thread::sleep(Duration::from_millis(100));
-                        }
-                    }
-                }
-            })?;
-        Ok(Self {
-            devices,
-            stop,
-            listener: Some(worker),
-            port,
-            next_devnum: AtomicU32::new(1),
-        })
+        let inner = usbip_audio::Server::start(port, Arc::new(MonotonicClock::new()))?;
+        Ok(Self { inner })
     }
 
     pub fn port(&self) -> u16 {
-        self.port
+        self.inner.port()
     }
 
     pub fn add(&self, key: &str, name: &str, delay_ms: u8) -> DeviceStreams {
         let busid = format!("1-{}", &key[..key.len().min(16)]);
-        let devnum = self.next_devnum.fetch_add(1, Ordering::Relaxed);
         let pcm = Arc::new(PcmQueue::default());
-        let (volume_tx, volume) = mpsc::sync_channel(16);
-        let device = Arc::new(Device {
-            busid: busid.clone(),
-            devnum,
-            name: name.to_owned(),
+        let (volume_events, volume) = mpsc::sync_channel(16);
+        let config = Uac1SpeakerConfig {
+            vendor_id: VENDOR_ID,
+            product_id: PRODUCT_ID,
+            manufacturer: "Win AirPlay".into(),
+            product: name.to_owned(),
             serial: key.to_owned(),
             delay_ms,
-            active: AtomicBool::new(true),
-            state: Mutex::new(DeviceState::default()),
-            pcm: pcm.clone(),
-            volume_events: volume_tx,
-        });
-        if let Some(previous) = self.devices.write().unwrap().insert(busid.clone(), device) {
-            previous.active.store(false, Ordering::Release);
-        }
+        };
+        let streams = SpeakerStreams { pcm: pcm.clone(), volume_events };
+        self.inner.add(&busid, Arc::new(Uac1Speaker::new(config, streams)));
         DeviceStreams { busid, pcm, volume }
     }
 
     pub fn remove(&self, busid: &str) {
-        if let Some(device) = self.devices.write().unwrap().remove(busid) {
-            device.active.store(false, Ordering::Release);
-        }
+        self.inner.remove(busid);
     }
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        // Wake the blocking accept so shutdown can join the listener promptly.
-        let _ = TcpStream::connect((Ipv4Addr::LOCALHOST, self.port));
-        if let Some(worker) = self.listener.take() {
-            let _ = worker.join();
-        }
-        for device in self.devices.write().unwrap().values() {
-            device.active.store(false, Ordering::Release);
-        }
-    }
-}
-
-fn put_u16(out: &mut Vec<u8>, value: u16) {
-    out.extend_from_slice(&value.to_be_bytes());
-}
-fn put_u32(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_be_bytes());
-}
-fn be32(bytes: &[u8]) -> u32 {
-    u32::from_be_bytes(bytes.try_into().unwrap())
-}
-fn fixed(out: &mut Vec<u8>, text: &str, width: usize) {
-    let mut field = vec![0; width];
-    let length = text.len().min(width.saturating_sub(1));
-    field[..length].copy_from_slice(&text.as_bytes()[..length]);
-    out.extend_from_slice(&field);
-}
-
-fn device_info(device: &Device, interfaces: bool) -> Vec<u8> {
-    let mut out = Vec::with_capacity(320);
-    fixed(
-        &mut out,
-        &format!("/virtual/win-airplay/{}", device.busid),
-        256,
-    );
-    fixed(&mut out, &device.busid, 32);
-    put_u32(&mut out, 1); // busnum
-    put_u32(&mut out, device.devnum);
-    put_u32(&mut out, 2); // full speed
-    put_u16(&mut out, 0xcafe); // prototype VID; production requires an assigned VID/PID
-    put_u16(&mut out, 0x4001);
-    put_u16(&mut out, 0x0100);
-    out.extend_from_slice(&[0, 0, 0, 1, 1, 2]);
-    if interfaces {
-        out.extend_from_slice(&[1, 1, 0, 0, 1, 2, 0, 0]);
-    }
-    out
-}
-
-fn response_header(code: u16, status: u32) -> Vec<u8> {
-    let mut out = Vec::with_capacity(12);
-    put_u16(&mut out, VERSION);
-    put_u16(&mut out, code);
-    put_u32(&mut out, status);
-    out
-}
-
-fn serve_client(
-    mut stream: TcpStream,
-    devices: &Arc<RwLock<BTreeMap<String, Arc<Device>>>>,
-    stop: &AtomicBool,
-) -> io::Result<()> {
-    // Keep client reads blocking even if the listener mode changes later.
-    stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(Duration::from_millis(500)))?;
-    stream.set_nodelay(true)?;
-    let mut preamble = [0; 8];
-    read_exact_active(&mut stream, &mut preamble, stop, None)?;
-    if u16::from_be_bytes([preamble[0], preamble[1]]) != VERSION {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "unsupported USB/IP version",
-        ));
-    }
-    match u16::from_be_bytes([preamble[2], preamble[3]]) {
-        0x8005 => {
-            let snapshot = devices
-                .read()
-                .unwrap()
-                .values()
-                .filter(|d| d.active.load(Ordering::Acquire))
-                .cloned()
-                .collect::<Vec<_>>();
-            let mut out = response_header(5, 0);
-            put_u32(&mut out, snapshot.len() as u32);
-            for device in snapshot {
-                out.extend_from_slice(&device_info(&device, true));
-            }
-            stream.write_all(&out)
-        }
-        0x8003 => {
-            let mut field = [0; 32];
-            read_exact_active(&mut stream, &mut field, stop, None)?;
-            let end = field.iter().position(|&byte| byte == 0).unwrap_or(32);
-            let busid =
-                std::str::from_utf8(&field[..end]).map_err(|_| io::ErrorKind::InvalidData)?;
-            let device = devices.read().unwrap().get(busid).cloned();
-            let mut out = response_header(3, u32::from(device.is_none()));
-            if let Some(device) = device {
-                out.extend_from_slice(&device_info(&device, false));
-                stream.write_all(&out)?;
-                serve_imported(&mut stream, &device, stop)
-            } else {
-                stream.write_all(&out)
-            }
-        }
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "unknown USB/IP operation",
-        )),
-    }
-}
-
-fn read_exact_active(
-    stream: &mut TcpStream,
-    bytes: &mut [u8],
-    stop: &AtomicBool,
-    device: Option<&Device>,
-) -> io::Result<()> {
-    let mut offset = 0;
-    while offset < bytes.len() {
-        if stop.load(Ordering::Acquire) || device.is_some_and(|d| !d.active.load(Ordering::Acquire))
-        {
-            return Err(io::ErrorKind::ConnectionAborted.into());
-        }
-        match stream.read(&mut bytes[offset..]) {
-            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
-            Ok(count) => offset += count,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                // Keep the loop bounded even if a socket unexpectedly becomes
-                // nonblocking after it was accepted.
-                thread::sleep(Duration::from_millis(5));
-            }
-            Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(())
-}
-
-fn next_iso_deadline(previous: Instant, now: Instant, packets: u32) -> Instant {
-    // Preserve the USB audio clock across URBs. Restarting each 10 ms period
-    // from `now` also adds processing time to every period, starving AirPlay.
-    // Limit catch-up to 20 ms after an unusually long scheduling pause.
-    let oldest = now.checked_sub(Duration::from_millis(20)).unwrap_or(now);
-    previous.max(oldest) + Duration::from_millis(u64::from(packets.min(100)))
-}
-
-fn serve_imported(stream: &mut TcpStream, device: &Device, stop: &AtomicBool) -> io::Result<()> {
-    let mut next_audio_due = std::time::Instant::now();
-    loop {
-        let mut header = [0; 48];
-        read_exact_active(stream, &mut header, stop, Some(device))?;
-        let command = be32(&header[0..4]);
-        let seq = be32(&header[4..8]);
-        let direction = be32(&header[12..16]);
-        let ep = be32(&header[16..20]);
-        match command {
-            1 => {
-                let length = be32(&header[24..28]) as usize;
-                let packets = be32(&header[32..36]);
-                if length > MAX_TRANSFER
-                    || (packets != u32::MAX && packets as usize > MAX_ISO_PACKETS)
-                    || direction > 1
-                {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "oversized USB/IP transfer",
-                    ));
-                }
-                let mut payload = if direction == 0 {
-                    vec![0; length]
-                } else {
-                    Vec::new()
-                };
-                if !payload.is_empty() {
-                    read_exact_active(stream, &mut payload, stop, Some(device))?;
-                }
-                let mut iso = if packets == u32::MAX {
-                    Vec::new()
-                } else {
-                    vec![0; packets as usize * 16]
-                };
-                if !iso.is_empty() {
-                    read_exact_active(stream, &mut iso, stop, Some(device))?;
-                }
-                let setup: [u8; 8] = header[40..48].try_into().unwrap();
-                let (status, data, actual, iso_reply) =
-                    handle_submit(device, ep, direction, setup, length, &payload, &iso);
-                if status != 0 && URB_ERRORS_LOGGED.fetch_add(1, Ordering::Relaxed) < 20 {
-                    let alternate = device.state.lock().unwrap().alternate;
-                    let requested_iso_bytes: usize = iso
-                        .as_chunks::<16>()
-                        .0
-                        .iter()
-                        .map(|packet| be32(&packet[4..8]) as usize)
-                        .sum();
-                    eprintln!("USB/IP URB failed: ep={ep} direction={direction} setup={setup:02x?} length={length} packets={packets} alternate={alternate} requested_iso_bytes={requested_iso_bytes} status={status}");
-                }
-                let mut out = Vec::with_capacity(48 + data.len() + iso_reply.len());
-                put_u32(&mut out, 3);
-                put_u32(&mut out, seq);
-                put_u32(&mut out, 0);
-                put_u32(&mut out, 0);
-                put_u32(&mut out, 0);
-                put_u32(&mut out, status as u32);
-                put_u32(&mut out, actual as u32);
-                put_u32(&mut out, be32(&header[28..32]));
-                put_u32(&mut out, packets);
-                put_u32(&mut out, 0);
-                out.extend_from_slice(&[0; 8]);
-                out.extend_from_slice(&data);
-                out.extend_from_slice(&iso_reply);
-                if ep == 1 && direction == 0 && packets > 0 && packets != u32::MAX {
-                    let now = std::time::Instant::now();
-                    next_audio_due = next_iso_deadline(next_audio_due, now, packets);
-                    thread::sleep(next_audio_due.saturating_duration_since(now));
-                }
-                stream.write_all(&out)?;
-            }
-            2 => {
-                let mut out = Vec::with_capacity(48);
-                put_u32(&mut out, 4);
-                put_u32(&mut out, seq);
-                out.extend_from_slice(&[0; 40]);
-                stream.write_all(&out)?;
-            }
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "unknown USB/IP URB",
-                ))
-            }
-        }
-    }
-}
-
-fn handle_submit(
-    device: &Device,
-    ep: u32,
-    direction: u32,
-    setup: [u8; 8],
-    length: usize,
-    payload: &[u8],
-    iso: &[u8],
-) -> (i32, Vec<u8>, usize, Vec<u8>) {
-    if ep == 0 {
-        return match control(device, setup, payload) {
-            Ok(mut data) => {
-                data.truncate(length);
-                let actual = if direction == 0 {
-                    payload.len()
-                } else {
-                    data.len()
-                };
-                (0, data, actual, Vec::new())
-            }
-            Err(status) => (status, Vec::new(), 0, Vec::new()),
-        };
-    }
-    // usbip-win2 forwards audio URBs even when it handles SET_INTERFACE
-    // locally rather than forwarding that control request to this server.
-    // A valid transfer on endpoint 1 is sufficient evidence that Windows
-    // selected the streaming alternate setting.
-    if ep != 1 || direction != 0 || iso.is_empty() {
-        return (EPIPE, Vec::new(), 0, Vec::new());
-    }
-    device.state.lock().unwrap().alternate = 1;
-    let mut reply = iso.to_vec();
-    let mut compact = Vec::with_capacity(payload.len());
-    let mut actual = 0usize;
-    let mut cursor = 0usize;
-    for entry in reply.as_chunks_mut::<16>().0 {
-        // Windows can submit a short final isochronous buffer while retaining
-        // the requested size in each packet descriptor. Complete the available
-        // frames and report the actual length of each packet.
-        let packet_len = (be32(&entry[4..8]) as usize).min(payload.len() - cursor);
-        compact.extend_from_slice(&payload[cursor..cursor + packet_len]);
-        cursor += packet_len;
-        entry[8..12].copy_from_slice(&(packet_len as u32).to_be_bytes());
-        entry[12..16].fill(0);
-        actual += packet_len;
-    }
-    if !compact.is_empty() {
-        device.pcm.push(compact);
-    }
-    (0, Vec::new(), actual, reply)
-}
-
-fn control(device: &Device, setup: [u8; 8], payload: &[u8]) -> Result<Vec<u8>, i32> {
-    let request_type = setup[0];
-    let request = setup[1];
-    let value = u16::from_le_bytes([setup[2], setup[3]]);
-    let index = u16::from_le_bytes([setup[4], setup[5]]);
-    let length = u16::from_le_bytes([setup[6], setup[7]]) as usize;
-    let mut state = device.state.lock().unwrap();
-    match (request_type, request) {
-        (0x80, 6) => {
-            let descriptor = match (value >> 8) as u8 {
-                1 => device_descriptor(),
-                2 => configuration_descriptor(device.delay_ms),
-                3 => string_descriptor(device, value as u8)?,
-                _ => return Err(EPIPE),
-            };
-            Ok(descriptor[..descriptor.len().min(length)].to_vec())
-        }
-        (0x00, 5) => Ok(Vec::new()), // SET_ADDRESS is virtualized by the host controller
-        (0x00, 9) if value <= 1 => {
-            state.configuration = value as u8;
-            Ok(Vec::new())
-        }
-        (0x80, 8) => Ok(vec![state.configuration]),
-        (0x02, 1) if index == 1 && value == 0 => Ok(Vec::new()), // CLEAR_FEATURE(ENDPOINT_HALT)
-        (0x01, 11) if index == 1 && value <= 1 => {
-            state.alternate = value as u8;
-            Ok(Vec::new())
-        }
-        (0x81, 10) if index == 1 => Ok(vec![state.alternate]),
-        (0x80, 0) | (0x81, 0) | (0x82, 0) => Ok(vec![0, 0]), // GET_STATUS
-        (0x21, 1) if index == 0x0200 => {
-            let channel = value as u8;
-            let selector = (value >> 8) as u8;
-            match (selector, channel) {
-                (1, 0) if !payload.is_empty() => state.volume.muted = payload[0] != 0,
-                (2, 0..=2) if payload.len() >= 2 => {
-                    let db = i16::from_le_bytes([payload[0], payload[1]]) as f32 / 256.0;
-                    let scalar = (10.0_f32).powf(db / 20.0).clamp(0.0, 1.0);
-                    if channel == 0 {
-                        state.volume.scalar = scalar;
-                    } else {
-                        state.volume.channels[channel as usize - 1] = scalar;
-                    }
-                }
-                _ => return Err(EPIPE),
-            }
-            let _ = device.volume_events.try_send(state.volume);
-            Ok(Vec::new())
-        }
-        (0xa1, 0x81..=0x84) if index == 0x0200 => {
-            let channel = value as u8;
-            let selector = (value >> 8) as u8;
-            match (selector, request, channel) {
-                (1, 0x81, 0) => Ok(vec![u8::from(state.volume.muted)]),
-                (2, 0x81, 0..=2) => {
-                    let scalar = if channel == 0 {
-                        state.volume.scalar
-                    } else {
-                        state.volume.channels[channel as usize - 1]
-                    };
-                    let db = if scalar <= 0.001 {
-                        -96.0
-                    } else {
-                        20.0 * scalar.log10()
-                    };
-                    Ok(((db.clamp(-96.0, 0.0) * 256.0) as i16)
-                        .to_le_bytes()
-                        .to_vec())
-                }
-                (2, 0x82, 0..=2) => Ok((-96_i16 * 256).to_le_bytes().to_vec()),
-                (2, 0x83, 0..=2) => Ok(0_i16.to_le_bytes().to_vec()),
-                (2, 0x84, 0..=2) => Ok(256_i16.to_le_bytes().to_vec()),
-                _ => Err(EPIPE),
-            }
-        }
-        _ => Err(EPIPE),
-    }
-}
-
-fn device_descriptor() -> Vec<u8> {
-    vec![
-        18, 1, 0x00, 0x02, 0, 0, 0, 64, 0xfe, 0xca, 0x01, 0x40, 0x00, 0x01, 1, 2, 3, 1,
-    ]
-}
-
-fn configuration_descriptor(delay_ms: u8) -> Vec<u8> {
-    let mut out = vec![
-        9, 2, 0, 0, 2, 1, 0, 0x80, 50, // configuration
-        9, 4, 0, 0, 0, 1, 1, 0, 0, // AudioControl interface
-        9, 0x24, 1, 0, 1, 40, 0, 1, 1, // AC header, streaming interface 1
-        12, 0x24, 2, 1, 0x01, 0x01, 0, 2, 3, 0, 0, 0, // USB-streaming input terminal
-        10, 0x24, 6, 2, 1, 1, 3, 2, 2, 0, // mute/volume Feature Unit
-        9, 0x24, 3, 3, 0x01, 0x03, 0, 2, 0, // speaker output terminal
-        9, 4, 1, 0, 0, 1, 2, 0, 0, // AudioStreaming alt 0
-        9, 4, 1, 1, 1, 1, 2, 0, 0, // AudioStreaming alt 1
-        7, 0x24, 1, 1, delay_ms, 1, 0, // AS general, PCM; bDelay is USB frames (ms)
-        11, 0x24, 2, 1, 2, 2, 16, 1, 0x44, 0xac, 0, // 44.1 kHz stereo 16-bit
-        9, 5, 1, 0x0d, 180, 0, 1, 0, 0, // synchronous isochronous OUT
-        7, 0x25, 1, 0, 0, 0, 0, // class-specific endpoint
-    ];
-    let length = out.len() as u16;
-    out[2..4].copy_from_slice(&length.to_le_bytes());
-    out
-}
-
-fn string_descriptor(device: &Device, index: u8) -> Result<Vec<u8>, i32> {
-    if index == 0 {
-        return Ok(vec![4, 3, 0x09, 0x04]);
-    }
-    let value = match index {
-        1 => "Win AirPlay",
-        2 => &device.name,
-        3 => &device.serial,
-        _ => return Err(EPIPE),
-    };
-    let utf16 = value.encode_utf16().take(126).collect::<Vec<_>>();
-    let mut out = vec![(utf16.len() * 2 + 2) as u8, 3];
-    for unit in utf16 {
-        out.extend_from_slice(&unit.to_le_bytes());
-    }
-    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::{Ipv4Addr, TcpStream};
 
-    #[test]
-    fn iso_deadline_does_not_accumulate_processing_time() {
-        let start = Instant::now();
-        let mut due = start;
-        for _ in 0..1_000 {
-            let now = due + Duration::from_micros(500);
-            due = next_iso_deadline(due, now, 10);
-        }
-        assert_eq!(due.duration_since(start), Duration::from_secs(10));
-        let late = due + Duration::from_secs(1);
-        let resumed = next_iso_deadline(due, late, 10);
-        assert!(resumed <= late + Duration::from_millis(10));
+    fn put_u32(out: &mut Vec<u8>, value: u32) {
+        out.extend_from_slice(&value.to_be_bytes());
+    }
+
+    fn be32(bytes: &[u8]) -> u32 {
+        u32::from_be_bytes(bytes[..4].try_into().unwrap())
+    }
+
+    fn fixed(out: &mut Vec<u8>, text: &str, width: usize) {
+        out.extend_from_slice(text.as_bytes());
+        out.resize(out.len() + width - text.len(), 0);
     }
 
     #[test]
@@ -673,23 +185,6 @@ mod tests {
         assert!(queue.idle_for().is_some());
         queue.push(vec![100, 0, 1, 0]);
         assert_eq!(queue.pop_timeout(Duration::ZERO), Some(vec![100, 0, 1, 0]));
-    }
-
-    #[test]
-    fn descriptors_are_well_formed() {
-        let config = configuration_descriptor(180);
-        assert_eq!(&config[76..83], &[7, 0x24, 1, 1, 180, 1, 0]);
-        assert_eq!(
-            u16::from_le_bytes([config[2], config[3]]) as usize,
-            config.len()
-        );
-        assert_eq!(config[4], 2);
-        let mut offset = 0;
-        while offset < config.len() {
-            assert!(config[offset] >= 2);
-            offset += config[offset] as usize;
-        }
-        assert_eq!(offset, config.len());
     }
 
     #[test]
@@ -737,10 +232,10 @@ mod tests {
         client.read_exact(&mut reply).unwrap();
         assert_eq!(be32(&reply[20..24]), 0);
         let length = be32(&reply[24..28]) as usize;
-        assert_eq!(length, configuration_descriptor(180).len());
+        assert_eq!(length, 110, "the whole configuration descriptor");
         let mut config = vec![0; length];
         client.read_exact(&mut config).unwrap();
-        assert_eq!(config, configuration_descriptor(180));
+        assert_eq!(&config[76..83], &[7, 0x24, 1, 1, 180, 1, 0], "bDelay");
         for (sequence, setup) in [[0, 9, 1, 0, 0, 0, 0, 0], [1, 11, 1, 0, 1, 0, 0, 0]]
             .into_iter()
             .enumerate()

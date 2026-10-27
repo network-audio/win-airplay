@@ -805,7 +805,8 @@ fn run_usbip_manager() -> Result<(), String> {
 
     windows_audio::initialize()?;
     let server =
-        usbip_audio::Server::start(3240).map_err(|error| format!("USB/IP server: {error}"))?;
+        // any free port: other applications may run USB/IP servers for the same driver
+        usbip_audio::Server::start(0).map_err(|error| format!("USB/IP server: {error}"))?;
     let (discovery_tx, discovery_rx) = mpsc::channel();
     std::thread::spawn(move || {
         loop {
