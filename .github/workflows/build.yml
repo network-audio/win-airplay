@@ -163,7 +163,7 @@ jobs:
           Write-Host "Bundled ARM64 installer found USBip at $usbip"
 
   usbip-windows-smoke:
-    if: github.ref_name == 'main' || github.ref_name == 'codex/usbip-win2-investigation'
+    if: github.ref_name == 'main' || github.event_name == 'pull_request'
     needs: rust
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25

@@ -1023,6 +1023,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "usbip-audio"
+version = "0.1.0"
+source = "git+https://github.com/stakach/usbip-audio?rev=bd68b8d738723d0e1d4eb719a9fac44699dd1eca#bd68b8d738723d0e1d4eb719a9fac44699dd1eca"
+dependencies = [
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "utf8parse"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1066,6 +1074,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "usbip-audio",
  "windows",
 ]
 
