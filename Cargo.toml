@@ -1,6 +1,6 @@
 [package]
 name = "win-airplay"
-version = "1.0.2"
+version = "1.1.0"
 edition = "2021"
 license = "MIT"
 description = "AirPlay 2 discovery and Windows audio sender controller"
