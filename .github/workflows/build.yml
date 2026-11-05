@@ -163,7 +163,7 @@ jobs:
           Write-Host "Bundled ARM64 installer found USBip at $usbip"
 
   usbip-windows-smoke:
-    if: github.ref_name == 'main' || github.ref_name == 'codex/usbip-win2-investigation'
+    if: github.ref_name == 'main' || github.ref_name == 'codex/usbip-win2-investigation' || github.ref_name == 'codex/airplay-input'
     needs: rust
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
@@ -260,5 +260,35 @@ jobs:
             Stop-Process -Id $probe.Id -ErrorAction SilentlyContinue
             if (Test-Path probe-out.log) { Get-Content probe-out.log }
             if (Test-Path probe-err.log) { Get-Content probe-err.log }
+          }
+
+      - name: Check USB Audio 2 microphone, jack state and WASAPI capture
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . ./packaging/windows/find-usbip.ps1
+          $usbip = Find-UsbipExecutable
+          $probe = Start-Process -FilePath .\probe\win-airplay.exe -ArgumentList 'usbip-input-probe' -RedirectStandardOutput input-out.log -RedirectStandardError input-err.log -PassThru
+          try {
+            Start-Sleep -Seconds 2
+            $port = (& $usbip --tcp-port 3240 attach --remote 127.0.0.1 --bus-id 1-capture-probe --once --terse | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or $port -notmatch '^\d+$') { throw 'USBip could not attach the input' }
+            try {
+              $found = $false
+              for ($attempt = 0; $attempt -lt 20; $attempt++) {
+                $devices = @(Get-PnpDevice -PresentOnly | Where-Object { $_.FriendlyName -like '*Win AirPlay Input Probe*' })
+                if ($devices.Count -gt 0) { $found = $true; break }
+                Start-Sleep -Milliseconds 500
+              }
+              if (-not $found) { throw 'Windows did not enumerate the USB microphone' }
+              & .\probe\win-airplay.exe usbip-capture-test
+              if ($LASTEXITCODE -ne 0) { throw 'WASAPI input capture or jack state failed' }
+            } finally {
+              Start-Process -FilePath $usbip -ArgumentList 'detach','--port',$port -Wait -PassThru | Out-Null
+            }
+          } finally {
+            Stop-Process -Id $probe.Id -ErrorAction SilentlyContinue
+            if (Test-Path input-out.log) { Get-Content input-out.log }
+            if (Test-Path input-err.log) { Get-Content input-err.log }
           }
 

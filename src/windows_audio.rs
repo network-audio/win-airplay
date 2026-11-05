@@ -2,8 +2,9 @@ use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Foundation::BOOL;
 use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::{
-    eConsole, eRender, IAudioClient, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator,
-    MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED, DEVICE_STATE_ACTIVE, WAVEFORMATEX,
+    eCapture, eConsole, eRender, IAudioCaptureClient, IAudioClient, IAudioRenderClient, IMMDevice,
+    IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED, DEVICE_STATE,
+    DEVICE_STATE_ACTIVE, DEVICE_STATE_UNPLUGGED, WAVEFORMATEX,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
@@ -13,6 +14,84 @@ pub fn initialize() -> Result<(), String> {
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
         .ok()
         .map_err(|error| error.to_string())
+}
+
+fn named_capture_input(expected_name: &str) -> Result<IMMDevice, String> {
+    let enumerator: IMMDeviceEnumerator =
+        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
+            .map_err(|error| error.to_string())?;
+    let collection = unsafe { enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE(15)) }
+        .map_err(|error| error.to_string())?;
+    let count = unsafe { collection.GetCount() }.map_err(|error| error.to_string())?;
+    for index in 0..count {
+        let device = unsafe { collection.Item(index) }.map_err(|error| error.to_string())?;
+        let store =
+            unsafe { device.OpenPropertyStore(STGM_READ) }.map_err(|error| error.to_string())?;
+        let name = unsafe { store.GetValue(&PKEY_Device_FriendlyName) }
+            .map_err(|error| error.to_string())?
+            .to_string();
+        if name.contains(expected_name) {
+            return Ok(device);
+        }
+    }
+    Err(format!("Capture endpoint {expected_name:?} was not found"))
+}
+
+pub fn test_capture_input(expected_name: &str) -> Result<(), String> {
+    let device = named_capture_input(expected_name)?;
+    let initial = unsafe { device.GetState() }.map_err(|error| error.to_string())?;
+    if initial != DEVICE_STATE_UNPLUGGED {
+        return Err(format!(
+            "Capture endpoint should start unplugged: {initial:?}"
+        ));
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while unsafe { device.GetState() }.map_err(|error| error.to_string())? != DEVICE_STATE_ACTIVE {
+        if std::time::Instant::now() >= deadline {
+            return Err("Capture endpoint did not become active".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let client: IAudioClient =
+        unsafe { device.Activate(CLSCTX_ALL, None) }.map_err(|error| error.to_string())?;
+    let format = WAVEFORMATEX {
+        wFormatTag: 1,
+        nChannels: 2,
+        nSamplesPerSec: 44_100,
+        nAvgBytesPerSec: 176_400,
+        nBlockAlign: 4,
+        wBitsPerSample: 16,
+        cbSize: 0,
+    };
+    unsafe { client.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 500_000, 0, &format, None) }
+        .map_err(|error| format!("Capture Initialize: {error}"))?;
+    let capture: IAudioCaptureClient =
+        unsafe { client.GetService() }.map_err(|error| format!("Capture GetService: {error}"))?;
+    unsafe { client.Start() }.map_err(|error| format!("Capture Start: {error}"))?;
+    let mut nonzero = 0;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && nonzero == 0 {
+        let frames = unsafe { capture.GetNextPacketSize() }.map_err(|error| error.to_string())?;
+        if frames > 0 {
+            let mut data = std::ptr::null_mut();
+            let mut count = 0;
+            let mut flags = 0;
+            unsafe { capture.GetBuffer(&mut data, &mut count, &mut flags, None, None) }
+                .map_err(|error| format!("Capture GetBuffer: {error}"))?;
+            if !data.is_null() && flags & 2 == 0 {
+                let bytes = unsafe { std::slice::from_raw_parts(data, count as usize * 4) };
+                nonzero += bytes.iter().filter(|&&byte| byte != 0).count();
+            }
+            unsafe { capture.ReleaseBuffer(count) }.map_err(|error| error.to_string())?;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    unsafe { client.Stop() }.map_err(|error| error.to_string())?;
+    if nonzero == 0 {
+        return Err("No PCM reached the Windows capture endpoint".into());
+    }
+    println!("Windows captured nonzero PCM from {expected_name}");
+    Ok(())
 }
 
 pub struct DefaultOutput {

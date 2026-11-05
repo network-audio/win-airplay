@@ -11,6 +11,9 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
+mod input;
+pub use input::CaptureInput;
+
 const VERSION: u16 = 0x0111;
 const MAX_TRANSFER: usize = 1024 * 1024;
 const MAX_ISO_PACKETS: usize = 1024;
@@ -46,6 +49,7 @@ struct Device {
     state: Mutex<DeviceState>,
     pcm: Arc<PcmQueue>,
     volume_events: SyncSender<Volume>,
+    input: Option<Arc<CaptureInput>>,
 }
 
 #[derive(Default)]
@@ -60,6 +64,12 @@ pub struct DeviceStreams {
     pub busid: String,
     pub pcm: Arc<PcmQueue>,
     pub volume: Receiver<Volume>,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub struct InputStreams {
+    pub busid: String,
+    pub input: Arc<CaptureInput>,
 }
 
 #[derive(Default)]
@@ -197,11 +207,36 @@ impl Server {
             state: Mutex::new(DeviceState::default()),
             pcm: pcm.clone(),
             volume_events: volume_tx,
+            input: None,
         });
         if let Some(previous) = self.devices.write().unwrap().insert(busid.clone(), device) {
             previous.active.store(false, Ordering::Release);
         }
         DeviceStreams { busid, pcm, volume }
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn add_input(&self, key: &str, name: &str) -> InputStreams {
+        let busid = format!("1-{}", &key[..key.len().min(16)]);
+        let devnum = self.next_devnum.fetch_add(1, Ordering::Relaxed);
+        let input = Arc::new(CaptureInput::default());
+        let (volume_events, _) = mpsc::sync_channel(1);
+        let device = Arc::new(Device {
+            busid: busid.clone(),
+            devnum,
+            name: name.to_owned(),
+            serial: key.to_owned(),
+            delay_ms: 0,
+            active: AtomicBool::new(true),
+            state: Mutex::new(DeviceState::default()),
+            pcm: Arc::new(PcmQueue::default()),
+            volume_events,
+            input: Some(input.clone()),
+        });
+        if let Some(previous) = self.devices.write().unwrap().insert(busid.clone(), device) {
+            previous.active.store(false, Ordering::Release);
+        }
+        InputStreams { busid, input }
     }
 
     pub fn remove(&self, busid: &str) {
@@ -251,13 +286,25 @@ fn device_info(device: &Device, interfaces: bool) -> Vec<u8> {
     fixed(&mut out, &device.busid, 32);
     put_u32(&mut out, 1); // busnum
     put_u32(&mut out, device.devnum);
-    put_u32(&mut out, 2); // full speed
+    put_u32(&mut out, if device.input.is_some() { 3 } else { 2 }); // high/full speed
     put_u16(&mut out, 0xcafe); // prototype VID; production requires an assigned VID/PID
-    put_u16(&mut out, 0x4001);
+    put_u16(
+        &mut out,
+        if device.input.is_some() {
+            0x4002
+        } else {
+            0x4001
+        },
+    );
     put_u16(&mut out, 0x0100);
-    out.extend_from_slice(&[0, 0, 0, 1, 1, 2]);
+    if device.input.is_some() {
+        out.extend_from_slice(&[0xef, 2, 1, 1, 1, 2]);
+    } else {
+        out.extend_from_slice(&[0, 0, 0, 1, 1, 2]);
+    }
     if interfaces {
-        out.extend_from_slice(&[1, 1, 0, 0, 1, 2, 0, 0]);
+        let protocol = if device.input.is_some() { 0x20 } else { 0 };
+        out.extend_from_slice(&[1, 1, protocol, 0, 1, 2, protocol, 0]);
     }
     out
 }
@@ -361,8 +408,18 @@ fn next_iso_deadline(previous: Instant, now: Instant, packets: u32) -> Instant {
     previous.max(oldest) + Duration::from_millis(u64::from(packets.min(100)))
 }
 
+struct ImportedSession(Arc<AtomicBool>);
+impl Drop for ImportedSession {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 fn serve_imported(stream: &mut TcpStream, device: &Device, stop: &AtomicBool) -> io::Result<()> {
     let mut next_audio_due = std::time::Instant::now();
+    let session = ImportedSession(Arc::new(AtomicBool::new(true)));
+    let writer = Arc::new(Mutex::new(stream.try_clone()?));
+    let pending: Arc<Mutex<BTreeMap<u32, Arc<AtomicBool>>>> = Arc::new(Mutex::new(BTreeMap::new()));
     loop {
         let mut header = [0; 48];
         read_exact_active(stream, &mut header, stop, Some(device))?;
@@ -399,6 +456,43 @@ fn serve_imported(stream: &mut TcpStream, device: &Device, stop: &AtomicBool) ->
                 if !iso.is_empty() {
                     read_exact_active(stream, &mut iso, stop, Some(device))?;
                 }
+                if let Some(input) = device
+                    .input
+                    .as_ref()
+                    .filter(|_| ep == 2 && direction == 1 && iso.is_empty())
+                {
+                    let input = input.clone();
+                    let writer = writer.clone();
+                    let pending = pending.clone();
+                    let alive = session.0.clone();
+                    let cancelled = Arc::new(AtomicBool::new(false));
+                    pending.lock().unwrap().insert(seq, cancelled.clone());
+                    thread::Builder::new()
+                        .name("airplay-usbip-notification".into())
+                        .spawn(move || {
+                            while alive.load(Ordering::Acquire)
+                                && !cancelled.load(Ordering::Acquire)
+                            {
+                                if input.take_change() {
+                                    let event = [0, 1, 0, 2, 0, 1];
+                                    let size = length.min(event.len());
+                                    let mut out = Vec::with_capacity(48 + size);
+                                    for value in [3, seq, 0, 0, 0, 0, size as u32, 0, 0, 0] {
+                                        put_u32(&mut out, value);
+                                    }
+                                    out.extend_from_slice(&[0; 8]);
+                                    out.extend_from_slice(&event[..size]);
+                                    if !cancelled.load(Ordering::Acquire) {
+                                        let _ = writer.lock().unwrap().write_all(&out);
+                                    }
+                                    break;
+                                }
+                                input.wait_for_change();
+                            }
+                            pending.lock().unwrap().remove(&seq);
+                        })?;
+                    continue;
+                }
                 let setup: [u8; 8] = header[40..48].try_into().unwrap();
                 let (status, data, actual, iso_reply) =
                     handle_submit(device, ep, direction, setup, length, &payload, &iso);
@@ -426,19 +520,23 @@ fn serve_imported(stream: &mut TcpStream, device: &Device, stop: &AtomicBool) ->
                 out.extend_from_slice(&[0; 8]);
                 out.extend_from_slice(&data);
                 out.extend_from_slice(&iso_reply);
-                if ep == 1 && direction == 0 && packets > 0 && packets != u32::MAX {
+                if ep == 1 && packets > 0 && packets != u32::MAX {
                     let now = std::time::Instant::now();
                     next_audio_due = next_iso_deadline(next_audio_due, now, packets);
                     thread::sleep(next_audio_due.saturating_duration_since(now));
                 }
-                stream.write_all(&out)?;
+                writer.lock().unwrap().write_all(&out)?;
             }
             2 => {
+                let target = be32(&header[20..24]);
+                if let Some(cancelled) = pending.lock().unwrap().remove(&target) {
+                    cancelled.store(true, Ordering::Release);
+                }
                 let mut out = Vec::with_capacity(48);
                 put_u32(&mut out, 4);
                 put_u32(&mut out, seq);
                 out.extend_from_slice(&[0; 40]);
-                stream.write_all(&out)?;
+                writer.lock().unwrap().write_all(&out)?;
             }
             _ => {
                 return Err(io::Error::new(
@@ -473,6 +571,9 @@ fn handle_submit(
             Err(status) => (status, Vec::new(), 0, Vec::new()),
         };
     }
+    if let Some(input) = &device.input {
+        return input::handle_submit(input, &device.state, ep, direction, length, iso);
+    }
     // usbip-win2 forwards audio URBs even when it handles SET_INTERFACE
     // locally rather than forwarding that control request to this server.
     // A valid transfer on endpoint 1 is sufficient evidence that Windows
@@ -503,6 +604,9 @@ fn handle_submit(
 }
 
 fn control(device: &Device, setup: [u8; 8], payload: &[u8]) -> Result<Vec<u8>, i32> {
+    if let Some(input) = &device.input {
+        return input::control(input, &device.state, device, setup, payload);
+    }
     let request_type = setup[0];
     let request = setup[1];
     let value = u16::from_le_bytes([setup[2], setup[3]]);
