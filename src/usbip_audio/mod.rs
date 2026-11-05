@@ -474,7 +474,11 @@ fn serve_imported(stream: &mut TcpStream, device: &Device, stop: &AtomicBool) ->
                             while alive.load(Ordering::Acquire)
                                 && !cancelled.load(Ordering::Acquire)
                             {
-                                if input.take_change() {
+                                // usbip-win2 can submit multiple interrupt reads. Complete
+                                // the oldest one first; a later completion can remain behind
+                                // an earlier pending URB in the Windows host stack.
+                                let first = pending.lock().unwrap().keys().next().copied();
+                                if first == Some(seq) && input.take_change() {
                                     eprintln!("USB input connector change notification: seq={seq}");
                                     let event = [0, 1, 0, 2, 0, 1];
                                     let size = length.min(event.len());
