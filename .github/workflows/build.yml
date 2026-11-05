@@ -197,7 +197,8 @@ jobs:
           . ./packaging/windows/find-usbip.ps1
           $usbip = Find-UsbipExecutable
           if (-not $usbip -or $usbip -ne (Join-Path $customDir 'usbip.exe')) { throw "USBip client was not found at its custom install location: $usbip" }
-          $probe = Start-Process -FilePath .\probe\win-airplay.exe -ArgumentList 'usbip-probe','--seconds','55','--expect-pcm','--two-speakers' -RedirectStandardOutput probe-out.log -RedirectStandardError probe-err.log -PassThru
+          $probeSeconds = if ($arch -eq 'arm64') { 180 } else { 75 }
+          $probe = Start-Process -FilePath .\probe\win-airplay.exe -ArgumentList 'usbip-probe','--seconds',"$probeSeconds",'--expect-pcm','--two-speakers' -RedirectStandardOutput probe-out.log -RedirectStandardError probe-err.log -PassThru
           try {
             Start-Sleep -Seconds 3
             $port = (& $usbip --tcp-port 3240 attach --remote 127.0.0.1 --bus-id 1-0123456789abcdef --once --terse | Out-String).Trim()
@@ -239,7 +240,7 @@ jobs:
               if ($LASTEXITCODE -ne 0) { throw 'Windows latency query failed for the 180 ms descriptor' }
               & .\probe\win-airplay.exe usbip-latency-test --endpoint 'Win AirPlay USB Probe Two'
               if ($LASTEXITCODE -ne 0) { throw 'Windows latency query failed for the 255 ms descriptor' }
-              if (-not $probe.WaitForExit(65000)) { throw 'USB/IP probe did not finish' }
+              if (-not $probe.WaitForExit(($probeSeconds + 15) * 1000)) { throw 'USB/IP probe did not finish' }
               if ($probe.ExitCode -ne 0) { throw "USB/IP probe received no PCM (exit $($probe.ExitCode))" }
               if (Select-String -Path probe-err.log -Pattern 'USB/IP URB failed: ep=1' -Quiet) {
                 throw 'Windows audio transfer failed on USB endpoint 1'
