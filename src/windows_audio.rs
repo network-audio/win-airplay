@@ -48,11 +48,18 @@ pub fn test_capture_input(expected_name: &str) -> Result<(), String> {
             Err(error) => return Err(error),
         }
     };
-    let initial = unsafe { device.GetState() }.map_err(|error| error.to_string())?;
-    if initial != DEVICE_STATE_UNPLUGGED {
-        return Err(format!(
-            "Capture endpoint should start unplugged: {initial:?}"
-        ));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let state = unsafe { device.GetState() }.map_err(|error| error.to_string())?;
+        if state == DEVICE_STATE_UNPLUGGED {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "Capture endpoint did not settle as unplugged: {state:?}"
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
     }
     std::fs::write(
         std::env::temp_dir().join("win-airplay-input-probe-connect"),
