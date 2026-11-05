@@ -13,7 +13,10 @@ const SERVICE_TYPES: [&str; 2] = ["_airplay._tcp.local.", "_raop._tcp.local."];
 
 #[cfg(windows)]
 mod airplay;
+#[cfg(windows)]
+mod airplay_input;
 mod usbip_audio;
+mod usbip_input;
 #[cfg(windows)]
 mod windows_audio;
 #[cfg(windows)]
@@ -64,6 +67,12 @@ enum Action {
         #[arg(long)]
         two_speakers: bool,
     },
+    /// Export a USB Audio 2 capture function and exercise its connector state.
+    #[command(hide = true)]
+    UsbipInputProbe,
+    /// Verify Windows capture endpoint state and read PCM from it.
+    #[command(hide = true)]
+    UsbipCaptureTest,
     /// Send a WASAPI test tone directly to a named output without selecting it.
     #[command(hide = true)]
     UsbipRenderTest {
@@ -459,6 +468,50 @@ fn run(cli: Cli) -> Result<(), String> {
                 server.remove(&second.busid);
             }
         }
+        Action::UsbipInputProbe => {
+            let server = usbip_input::Server::start(3240).map_err(|error| error.to_string())?;
+            let streams = server.add_input("capture-probe", "Win AirPlay Input Probe");
+            let signal = std::env::temp_dir().join("win-airplay-input-probe-connect");
+            let _ = std::fs::remove_file(&signal);
+            println!(
+                "USB/IP input probe busid={} port={}",
+                streams.busid,
+                server.port()
+            );
+            let deadline = Instant::now() + Duration::from_secs(90);
+            while !signal.exists() {
+                if Instant::now() >= deadline {
+                    return Err("Windows capture test did not signal the probe".into());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let _ = std::fs::remove_file(&signal);
+            streams.input.set_connected(true);
+            println!("USB/IP input probe connected");
+            let mut phase = 0.0_f32;
+            for _ in 0..2000 {
+                let mut samples = Vec::with_capacity(441 * 2);
+                for _ in 0..441 {
+                    let value = (phase.sin() * 8000.0) as i16;
+                    samples.extend_from_slice(&[value, value]);
+                    phase += std::f32::consts::TAU * 440.0 / 44_100.0;
+                }
+                streams.input.write_pcm(&samples);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            streams.input.set_connected(false);
+            println!("USB/IP input probe disconnected");
+            std::thread::sleep(Duration::from_secs(5));
+        }
+        Action::UsbipCaptureTest => {
+            #[cfg(windows)]
+            {
+                windows_audio::initialize()?;
+                windows_audio::test_capture_input("Win AirPlay Input Probe")?;
+            }
+            #[cfg(not(windows))]
+            return Err("WASAPI capture testing requires Windows".into());
+        }
         Action::UsbipRenderTest { endpoint } => {
             #[cfg(windows)]
             {
@@ -807,6 +860,12 @@ fn run_usbip_manager() -> Result<(), String> {
     let server =
         // any free port: other applications may run USB/IP servers for the same driver
         usbip_audio::Server::start(0).map_err(|error| format!("USB/IP server: {error}"))?;
+    let input_server =
+        usbip_input::Server::start(0).map_err(|error| format!("USB/IP input server: {error}"))?;
+    let input_streams = input_server.add_input("airplay-capture", "Win AirPlay Input");
+    let receiver_device_id = airplay_input::start(input_streams.input.clone())?;
+    let mut input_port = None;
+    let mut last_input_attach = Instant::now() - Duration::from_secs(5);
     let (discovery_tx, discovery_rx) = mpsc::channel();
     std::thread::spawn(move || {
         loop {
@@ -919,6 +978,9 @@ fn run_usbip_manager() -> Result<(), String> {
                     let reachable: Vec<Speaker> = known
                         .values()
                         .flatten()
+                        .filter(|speaker| {
+                            speaker.device_id.as_deref() != Some(receiver_device_id.as_str())
+                        })
                         .map(|speaker| {
                             let mut speaker = speaker.clone();
                             if speaker.codecs.is_empty() {
@@ -960,6 +1022,16 @@ fn run_usbip_manager() -> Result<(), String> {
     let mut active: BTreeMap<String, Managed> = BTreeMap::new();
     let mut last_volume_check = Instant::now() - Duration::from_secs(1);
     loop {
+        if input_port.is_none() && last_input_attach.elapsed() >= Duration::from_secs(5) {
+            last_input_attach = Instant::now();
+            match usbip_attach(input_server.port(), &input_streams.busid) {
+                Ok(port) => {
+                    println!("USB input Win AirPlay Input on port {port}");
+                    input_port = Some(port);
+                }
+                Err(error) => eprintln!("Could not attach AirPlay input: {error}"),
+            }
+        }
         while let Ok(speakers) = discovery_rx.try_recv() {
             for managed in active.values_mut() {
                 managed.missed_scans = managed.missed_scans.saturating_add(1);

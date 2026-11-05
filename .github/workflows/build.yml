@@ -171,7 +171,7 @@ jobs:
           Write-Host "Bundled ARM64 installer found USBip at $usbip"
 
   usbip-windows-smoke:
-    if: github.ref_name == 'main' || github.event_name == 'pull_request'
+    if: github.ref_name == 'main' || github.event_name == 'pull_request' || github.ref_name == 'codex/airplay-input'
     needs: rust
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
@@ -205,7 +205,8 @@ jobs:
           . ./packaging/windows/find-usbip.ps1
           $usbip = Find-UsbipExecutable
           if (-not $usbip -or $usbip -ne (Join-Path $customDir 'usbip.exe')) { throw "USBip client was not found at its custom install location: $usbip" }
-          $probe = Start-Process -FilePath .\probe\win-airplay.exe -ArgumentList 'usbip-probe','--seconds','55','--expect-pcm','--two-speakers' -RedirectStandardOutput probe-out.log -RedirectStandardError probe-err.log -PassThru
+          $probeSeconds = if ($arch -eq 'arm64') { 180 } else { 75 }
+          $probe = Start-Process -FilePath .\probe\win-airplay.exe -ArgumentList 'usbip-probe','--seconds',"$probeSeconds",'--expect-pcm','--two-speakers' -RedirectStandardOutput probe-out.log -RedirectStandardError probe-err.log -PassThru
           try {
             Start-Sleep -Seconds 3
             $port = (& $usbip --tcp-port 3240 attach --remote 127.0.0.1 --bus-id 1-0123456789abcdef --once --terse | Out-String).Trim()
@@ -247,7 +248,7 @@ jobs:
               if ($LASTEXITCODE -ne 0) { throw 'Windows latency query failed for the 180 ms descriptor' }
               & .\probe\win-airplay.exe usbip-latency-test --endpoint 'Win AirPlay USB Probe Two'
               if ($LASTEXITCODE -ne 0) { throw 'Windows latency query failed for the 255 ms descriptor' }
-              if (-not $probe.WaitForExit(65000)) { throw 'USB/IP probe did not finish' }
+              if (-not $probe.WaitForExit(($probeSeconds + 15) * 1000)) { throw 'USB/IP probe did not finish' }
               if ($probe.ExitCode -ne 0) { throw "USB/IP probe received no PCM (exit $($probe.ExitCode))" }
               if (Select-String -Path probe-err.log -Pattern 'USB/IP URB failed: ep=1' -Quiet) {
                 throw 'Windows audio transfer failed on USB endpoint 1'
@@ -268,5 +269,47 @@ jobs:
             Stop-Process -Id $probe.Id -ErrorAction SilentlyContinue
             if (Test-Path probe-out.log) { Get-Content probe-out.log }
             if (Test-Path probe-err.log) { Get-Content probe-err.log }
+          }
+
+      - name: Check USB Audio 2 microphone, jack state and WASAPI capture
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($root in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone', 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone')) {
+            foreach ($path in @($root, "$root\NonPackaged")) {
+              New-Item -Path $path -Force | Out-Null
+              New-ItemProperty -Path $path -Name Value -Value Allow -PropertyType String -Force | Out-Null
+            }
+          }
+          $policy = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy'
+          New-Item -Path $policy -Force | Out-Null
+          New-ItemProperty -Path $policy -Name LetAppsAccessMicrophone -Value 1 -PropertyType DWord -Force | Out-Null
+          . ./packaging/windows/find-usbip.ps1
+          $usbip = Find-UsbipExecutable
+          $probe = Start-Process -FilePath .\probe\win-airplay.exe -ArgumentList 'usbip-input-probe' -RedirectStandardOutput input-out.log -RedirectStandardError input-err.log -PassThru
+          try {
+            Start-Sleep -Seconds 2
+            $port = (& $usbip --tcp-port 3240 attach --remote 127.0.0.1 --bus-id 1-capture-probe --once --terse | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or $port -notmatch '^\d+$') { throw 'USBip could not attach the input' }
+            try {
+              $found = $false
+              for ($attempt = 0; $attempt -lt 20; $attempt++) {
+                $devices = @(Get-PnpDevice -PresentOnly | Where-Object { $_.FriendlyName -like '*Win AirPlay Input Probe*' })
+                if ($devices.Count -gt 0) { $found = $true; break }
+                Start-Sleep -Milliseconds 500
+              }
+              if (-not $found) { throw 'Windows did not enumerate the USB microphone' }
+              & .\probe\win-airplay.exe usbip-capture-test
+              if ($LASTEXITCODE -ne 0) {
+                Get-PnpDevice | Where-Object { $_.FriendlyName -like '*Win AirPlay Input Probe*' } | Format-Table -AutoSize
+                throw 'WASAPI input capture or jack state failed'
+              }
+            } finally {
+              Start-Process -FilePath $usbip -ArgumentList 'detach','--port',$port -Wait -PassThru | Out-Null
+            }
+          } finally {
+            Stop-Process -Id $probe.Id -ErrorAction SilentlyContinue
+            if (Test-Path input-out.log) { Get-Content input-out.log }
+            if (Test-Path input-err.log) { Get-Content input-err.log }
           }
 
