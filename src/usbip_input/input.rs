@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn uac2_clock_and_connector_requests_use_get_cur_and_get_range() {
-        let server = crate::usbip_audio::Server::start(0).unwrap();
+        let server = crate::usbip_input::Server::start(0).unwrap();
         let streams = server.add_input("capture-test", "Test Input");
         let device = server
             .devices
