@@ -266,6 +266,15 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          foreach ($root in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone', 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone')) {
+            foreach ($path in @($root, "$root\NonPackaged")) {
+              New-Item -Path $path -Force | Out-Null
+              New-ItemProperty -Path $path -Name Value -Value Allow -PropertyType String -Force | Out-Null
+            }
+          }
+          $policy = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy'
+          New-Item -Path $policy -Force | Out-Null
+          New-ItemProperty -Path $policy -Name LetAppsAccessMicrophone -Value 1 -PropertyType DWord -Force | Out-Null
           . ./packaging/windows/find-usbip.ps1
           $usbip = Find-UsbipExecutable
           $probe = Start-Process -FilePath .\probe\win-airplay.exe -ArgumentList 'usbip-input-probe' -RedirectStandardOutput input-out.log -RedirectStandardError input-err.log -PassThru
@@ -282,7 +291,10 @@ jobs:
               }
               if (-not $found) { throw 'Windows did not enumerate the USB microphone' }
               & .\probe\win-airplay.exe usbip-capture-test
-              if ($LASTEXITCODE -ne 0) { throw 'WASAPI input capture or jack state failed' }
+              if ($LASTEXITCODE -ne 0) {
+                Get-PnpDevice | Where-Object { $_.FriendlyName -like '*Win AirPlay Input Probe*' } | Format-Table -AutoSize
+                throw 'WASAPI input capture or jack state failed'
+              }
             } finally {
               Start-Process -FilePath $usbip -ArgumentList 'detach','--port',$port -Wait -PassThru | Out-Null
             }

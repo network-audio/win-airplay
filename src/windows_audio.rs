@@ -93,6 +93,15 @@ pub fn test_capture_input(expected_name: &str) -> Result<(), String> {
         return Err("No PCM reached the Windows capture endpoint".into());
     }
     println!("Windows captured nonzero PCM from {expected_name}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while unsafe { device.GetState() }.map_err(|error| error.to_string())? != DEVICE_STATE_UNPLUGGED
+    {
+        if std::time::Instant::now() >= deadline {
+            return Err("Capture endpoint did not return to unplugged".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    println!("Windows capture endpoint returned to unplugged");
     Ok(())
 }
 
