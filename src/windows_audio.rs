@@ -38,7 +38,16 @@ fn named_capture_input(expected_name: &str) -> Result<IMMDevice, String> {
 }
 
 pub fn test_capture_input(expected_name: &str) -> Result<(), String> {
-    let device = named_capture_input(expected_name)?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let device = loop {
+        match named_capture_input(expected_name) {
+            Ok(device) => break device,
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            Err(error) => return Err(error),
+        }
+    };
     let initial = unsafe { device.GetState() }.map_err(|error| error.to_string())?;
     if initial != DEVICE_STATE_UNPLUGGED {
         return Err(format!(
