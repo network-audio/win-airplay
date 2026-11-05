@@ -26,7 +26,7 @@ struct Device {
     serial: String,
     active: AtomicBool,
     state: Mutex<DeviceState>,
-    input: Option<Arc<CaptureInput>>,
+    input: Arc<CaptureInput>,
 }
 
 #[derive(Default)]
@@ -111,7 +111,7 @@ impl Server {
             serial: key.to_owned(),
             active: AtomicBool::new(true),
             state: Mutex::new(DeviceState::default()),
-            input: Some(input.clone()),
+            input: input.clone(),
         });
         if let Some(previous) = self.devices.write().unwrap().insert(busid.clone(), device) {
             previous.active.store(false, Ordering::Release);
@@ -317,13 +317,9 @@ fn serve_imported(stream: &mut TcpStream, device: &Device, stop: &AtomicBool) ->
                 if !iso.is_empty() {
                     read_exact_active(stream, &mut iso, stop, Some(device))?;
                 }
-                if let Some(input) = device
-                    .input
-                    .as_ref()
-                    .filter(|_| ep == 2 && direction == 1 && iso.is_empty())
-                {
+                if ep == 2 && direction == 1 && iso.is_empty() {
                     eprintln!("USB input notification request queued: seq={seq} length={length}");
-                    let input = input.clone();
+                    let input = device.input.clone();
                     let writer = writer.clone();
                     let pending = pending.clone();
                     let alive = session.0.clone();
@@ -438,24 +434,11 @@ fn handle_submit(
             Err(status) => (status, Vec::new(), 0, Vec::new()),
         };
     }
-    input::handle_submit(
-        device.input.as_ref().unwrap(),
-        &device.state,
-        ep,
-        direction,
-        length,
-        iso,
-    )
+    input::handle_submit(&device.input, &device.state, ep, direction, length, iso)
 }
 
 fn control(device: &Device, setup: [u8; 8], payload: &[u8]) -> Result<Vec<u8>, i32> {
-    input::control(
-        device.input.as_ref().unwrap(),
-        &device.state,
-        device,
-        setup,
-        payload,
-    )
+    input::control(&device.input, &device.state, device, setup, payload)
 }
 
 fn string_descriptor(device: &Device, index: u8) -> Result<Vec<u8>, i32> {
