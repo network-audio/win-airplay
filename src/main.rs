@@ -470,12 +470,21 @@ fn run(cli: Cli) -> Result<(), String> {
         Action::UsbipInputProbe => {
             let server = usbip_audio::Server::start(3240).map_err(|error| error.to_string())?;
             let streams = server.add_input("capture-probe", "Win AirPlay Input Probe");
+            let signal = std::env::temp_dir().join("win-airplay-input-probe-connect");
+            let _ = std::fs::remove_file(&signal);
             println!(
                 "USB/IP input probe busid={} port={}",
                 streams.busid,
                 server.port()
             );
-            std::thread::sleep(Duration::from_secs(20));
+            let deadline = Instant::now() + Duration::from_secs(90);
+            while !signal.exists() {
+                if Instant::now() >= deadline {
+                    return Err("Windows capture test did not signal the probe".into());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let _ = std::fs::remove_file(&signal);
             streams.input.set_connected(true);
             println!("USB/IP input probe connected");
             let mut phase = 0.0_f32;

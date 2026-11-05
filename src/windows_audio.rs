@@ -45,6 +45,11 @@ pub fn test_capture_input(expected_name: &str) -> Result<(), String> {
             "Capture endpoint should start unplugged: {initial:?}"
         ));
     }
+    std::fs::write(
+        std::env::temp_dir().join("win-airplay-input-probe-connect"),
+        [],
+    )
+    .map_err(|error| format!("Could not signal input probe: {error}"))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while unsafe { device.GetState() }.map_err(|error| error.to_string())? != DEVICE_STATE_ACTIVE {
         if std::time::Instant::now() >= deadline {

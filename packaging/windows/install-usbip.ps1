@@ -9,6 +9,7 @@ $folder = Split-Path -Parent $MyInvocation.MyCommand.Path
 if ($Action -eq 'Uninstall') {
     Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+    Get-NetFirewallRule -DisplayName 'Win AirPlay Receiver *' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
     exit 0
 }
 
@@ -46,6 +47,11 @@ if (-not $usbip) {
     }
 }
 [System.IO.File]::WriteAllText((Join-Path $folder 'usbip-path.txt'), $usbip)
+
+Get-NetFirewallRule -DisplayName 'Win AirPlay Receiver *' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+foreach ($protocol in @('TCP', 'UDP')) {
+    New-NetFirewallRule -DisplayName "Win AirPlay Receiver $protocol" -Direction Inbound -Action Allow -Profile Private -Program (Join-Path $folder 'win-airplay.exe') -Protocol $protocol | Out-Null
+}
 
 $launcher = Join-Path $folder 'run-usbip.ps1'
 $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name

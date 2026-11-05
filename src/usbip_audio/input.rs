@@ -17,6 +17,7 @@ pub struct CaptureInput {
     notification: Mutex<()>,
     notification_ready: Condvar,
     pcm: Mutex<VecDeque<u8>>,
+    packet_clock: Mutex<u32>,
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -50,6 +51,14 @@ impl CaptureInput {
         (0..len).map(|_| pcm.pop_front().unwrap_or(0)).collect()
     }
 
+    fn next_packet_bytes(&self) -> usize {
+        let mut remainder = self.packet_clock.lock().unwrap();
+        *remainder += SAMPLE_RATE;
+        let frames = *remainder / 1000;
+        *remainder %= 1000;
+        frames as usize * 4
+    }
+
     pub(super) fn take_change(&self) -> bool {
         self.changed.swap(false, Ordering::AcqRel)
     }
@@ -79,7 +88,9 @@ pub(super) fn handle_submit(
     let mut reply = iso.to_vec();
     let mut data = Vec::new();
     for entry in reply.as_chunks_mut::<16>().0 {
-        let packet_len = (be32(&entry[4..8]) as usize).min(length.saturating_sub(data.len()));
+        let packet_len = (be32(&entry[4..8]) as usize)
+            .min(input.next_packet_bytes())
+            .min(length.saturating_sub(data.len()));
         data.extend(input.read(packet_len));
         entry[8..12].copy_from_slice(&(packet_len as u32).to_be_bytes());
         entry[12..16].fill(0);
@@ -196,5 +207,12 @@ mod tests {
         let input = CaptureInput::default();
         input.write_pcm(&[0x1234]);
         assert_eq!(input.read(4), [0x34, 0x12, 0, 0]);
+    }
+
+    #[test]
+    fn input_clock_produces_exactly_441_frames_per_10ms() {
+        let input = CaptureInput::default();
+        let bytes: usize = (0..10).map(|_| input.next_packet_bytes()).sum();
+        assert_eq!(bytes, 441 * 4);
     }
 }
