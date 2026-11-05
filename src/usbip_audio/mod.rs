@@ -461,6 +461,7 @@ fn serve_imported(stream: &mut TcpStream, device: &Device, stop: &AtomicBool) ->
                     .as_ref()
                     .filter(|_| ep == 2 && direction == 1 && iso.is_empty())
                 {
+                    eprintln!("USB input notification request queued: seq={seq} length={length}");
                     let input = input.clone();
                     let writer = writer.clone();
                     let pending = pending.clone();
@@ -474,6 +475,7 @@ fn serve_imported(stream: &mut TcpStream, device: &Device, stop: &AtomicBool) ->
                                 && !cancelled.load(Ordering::Acquire)
                             {
                                 if input.take_change() {
+                                    eprintln!("USB input connector change notification: seq={seq}");
                                     let event = [0, 1, 0, 2, 0, 1];
                                     let size = length.min(event.len());
                                     let mut out = Vec::with_capacity(48 + size);

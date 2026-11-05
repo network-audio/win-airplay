@@ -24,6 +24,7 @@ pub struct CaptureInput {
 impl CaptureInput {
     pub fn set_connected(&self, connected: bool) {
         if self.connected.swap(connected, Ordering::AcqRel) != connected {
+            eprintln!("USB input connector state changed: connected={connected}");
             self.changed.store(true, Ordering::Release);
             self.notification_ready.notify_all();
             if !connected {
@@ -144,7 +145,9 @@ pub(super) fn control(
         // Terminal 1 Connector Control: all channels connected during an
         // AirPlay session, none otherwise.
         (0xa1, 0x01) if index == 0x0100 && value == 0x0200 => {
-            if input.connected.load(Ordering::Acquire) {
+            let connected = input.connected.load(Ordering::Acquire);
+            eprintln!("USB input connector GET_CUR: connected={connected}");
+            if connected {
                 vec![2, 3, 0, 0, 0, 0]
             } else {
                 vec![0; 6]
