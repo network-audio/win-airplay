@@ -7,7 +7,7 @@ use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
 #[cfg_attr(not(windows), allow(dead_code))]
-const MAX_PCM_BYTES: usize = 44_100 * 2 * 2 * 2;
+const MAX_PCM_BYTES: usize = 44_100 * 2 * 2 / 2;
 const SAMPLE_RATE: u32 = 44_100;
 
 #[derive(Default)]

@@ -5,6 +5,7 @@ use mdns_sd::{ServiceDaemon, ServiceInfo};
 use openairplay2::{AudioSink, Event, Identity, Receiver};
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -17,6 +18,7 @@ struct UsbInputSink {
     rate: u32,
     channels: u8,
     next_due: Instant,
+    gain: Arc<AtomicU32>,
 }
 
 impl AudioSink for UsbInputSink {
@@ -24,7 +26,16 @@ impl AudioSink for UsbInputSink {
         if self.rate != 44_100 || self.channels != 2 {
             return;
         }
-        self.input.write_pcm(samples);
+        let gain = f32::from_bits(self.gain.load(Ordering::Relaxed));
+        if gain >= 0.999 {
+            self.input.write_pcm(samples);
+        } else {
+            let scaled: Vec<i16> = samples
+                .iter()
+                .map(|sample| (f32::from(*sample) * gain) as i16)
+                .collect();
+            self.input.write_pcm(&scaled);
+        }
         let frames = samples.len() / usize::from(self.channels);
         let duration = Duration::from_secs_f64(frames as f64 / f64::from(self.rate));
         self.next_due = self.next_due.max(Instant::now()) + duration;
@@ -77,12 +88,19 @@ pub fn start(input: Arc<CaptureInput>) -> Result<String, String> {
             runtime.block_on(async move {
                 let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
                 let event_input = input.clone();
+                let gain = Arc::new(AtomicU32::new(1.0_f32.to_bits()));
+                let event_gain = gain.clone();
                 tokio::spawn(async move {
                     while let Some(event) = received.recv().await {
                         match event {
                             Event::SessionStarted { rate, channels, peer } => {
+                                event_gain.store(1.0_f32.to_bits(), Ordering::Relaxed);
                                 println!("AirPlay input stream from {peer}: {rate} Hz, {channels} channels");
                                 event_input.set_connected(true);
+                            }
+                            Event::Volume { db } => {
+                                let linear = if db <= -100.0 { 0.0 } else { 10.0_f32.powf(db / 20.0) };
+                                event_gain.store(linear.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
                             }
                             Event::SessionEnded => {
                                 event_input.set_connected(false);
@@ -95,6 +113,7 @@ pub fn start(input: Arc<CaptureInput>) -> Result<String, String> {
                     event_input.set_connected(false);
                 });
                 let sink_input = input.clone();
+                let sink_gain = gain.clone();
                 if let Err(error) = receiver
                     .run(
                         move |rate, channels| {
@@ -103,6 +122,7 @@ pub fn start(input: Arc<CaptureInput>) -> Result<String, String> {
                                 rate,
                                 channels,
                                 next_due: Instant::now(),
+                                gain: sink_gain.clone(),
                             })
                         },
                         events,
