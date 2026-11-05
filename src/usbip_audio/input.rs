@@ -133,8 +133,8 @@ pub(super) fn control(
         (0x80, 0) | (0x81, 0) | (0x82, 0) => vec![0, 0],
         (0x02, 1) if index == 0x81 || index == 0x82 => Vec::new(),
         // Clock Source 4: a fixed 44.1-kHz clock.
-        (0xa1, 0x81) if index == 0x0400 && value == 0x0100 => SAMPLE_RATE.to_le_bytes().to_vec(),
-        (0xa1, 0x82) if index == 0x0400 && value == 0x0100 => {
+        (0xa1, 0x01) if index == 0x0400 && value == 0x0100 => SAMPLE_RATE.to_le_bytes().to_vec(),
+        (0xa1, 0x02) if index == 0x0400 && value == 0x0100 => {
             let mut range = vec![1, 0];
             range.extend(SAMPLE_RATE.to_le_bytes());
             range.extend(SAMPLE_RATE.to_le_bytes());
@@ -143,7 +143,7 @@ pub(super) fn control(
         }
         // Terminal 1 Connector Control: all channels connected during an
         // AirPlay session, none otherwise.
-        (0xa1, 0x81) if index == 0x0100 && value == 0x0200 => {
+        (0xa1, 0x01) if index == 0x0100 && value == 0x0200 => {
             if input.connected.load(Ordering::Acquire) {
                 vec![2, 3, 0, 0, 0, 0]
             } else {
@@ -214,5 +214,46 @@ mod tests {
         let input = CaptureInput::default();
         let bytes: usize = (0..10).map(|_| input.next_packet_bytes()).sum();
         assert_eq!(bytes, 441 * 4);
+    }
+
+    #[test]
+    fn uac2_clock_and_connector_requests_use_get_cur_and_get_range() {
+        let server = crate::usbip_audio::Server::start(0).unwrap();
+        let streams = server.add_input("capture-test", "Test Input");
+        let device = server
+            .devices
+            .read()
+            .unwrap()
+            .get(&streams.busid)
+            .unwrap()
+            .clone();
+        let range = control(
+            &streams.input,
+            &device.state,
+            &device,
+            [0xa1, 2, 0, 1, 0, 4, 255, 0],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(range.len(), 14);
+        let disconnected = control(
+            &streams.input,
+            &device.state,
+            &device,
+            [0xa1, 1, 0, 2, 0, 1, 6, 0],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(disconnected, [0; 6]);
+        streams.input.set_connected(true);
+        let connected = control(
+            &streams.input,
+            &device.state,
+            &device,
+            [0xa1, 1, 0, 2, 0, 1, 6, 0],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(connected, [2, 3, 0, 0, 0, 0]);
     }
 }

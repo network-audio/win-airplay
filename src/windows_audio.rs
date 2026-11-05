@@ -7,7 +7,7 @@ use windows::Win32::Media::Audio::{
     DEVICE_STATE_ACTIVE, DEVICE_STATE_UNPLUGGED, WAVEFORMATEX,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
 };
 
 pub fn initialize() -> Result<(), String> {
@@ -59,17 +59,13 @@ pub fn test_capture_input(expected_name: &str) -> Result<(), String> {
     }
     let client: IAudioClient =
         unsafe { device.Activate(CLSCTX_ALL, None) }.map_err(|error| error.to_string())?;
-    let format = WAVEFORMATEX {
-        wFormatTag: 1,
-        nChannels: 2,
-        nSamplesPerSec: 44_100,
-        nAvgBytesPerSec: 176_400,
-        nBlockAlign: 4,
-        wBitsPerSample: 16,
-        cbSize: 0,
-    };
-    unsafe { client.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 500_000, 0, &format, None) }
-        .map_err(|error| format!("Capture Initialize: {error}"))?;
+    let format = unsafe { client.GetMixFormat() }
+        .map_err(|error| format!("Capture GetMixFormat: {error}"))?;
+    let bytes_per_frame = unsafe { (*format).nBlockAlign } as usize;
+    let result =
+        unsafe { client.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 500_000, 0, format, None) };
+    unsafe { CoTaskMemFree(Some(format.cast())) };
+    result.map_err(|error| format!("Capture Initialize: {error}"))?;
     let capture: IAudioCaptureClient =
         unsafe { client.GetService() }.map_err(|error| format!("Capture GetService: {error}"))?;
     unsafe { client.Start() }.map_err(|error| format!("Capture Start: {error}"))?;
@@ -84,7 +80,8 @@ pub fn test_capture_input(expected_name: &str) -> Result<(), String> {
             unsafe { capture.GetBuffer(&mut data, &mut count, &mut flags, None, None) }
                 .map_err(|error| format!("Capture GetBuffer: {error}"))?;
             if !data.is_null() && flags & 2 == 0 {
-                let bytes = unsafe { std::slice::from_raw_parts(data, count as usize * 4) };
+                let bytes =
+                    unsafe { std::slice::from_raw_parts(data, count as usize * bytes_per_frame) };
                 nonzero += bytes.iter().filter(|&&byte| byte != 0).count();
             }
             unsafe { capture.ReleaseBuffer(count) }.map_err(|error| error.to_string())?;
