@@ -575,6 +575,7 @@ async fn buffered_audio(
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = vec![0u8; 64 * 1024];
     let mut decrypt_failures: u64 = 0;
+    let mut decode_failures: u64 = 0;
     let mut skipped: u64 = 0;
     loop {
         // Backpressure: if the player's queue is full, stop reading so the
@@ -615,7 +616,12 @@ async fn buffered_audio(
                             player.play(u64::from(audio.seq), audio.timestamp, pcm)
                         }
                         Ok(_) => {}
-                        Err(e) => debug!("buffered audio: decode error: {e}"),
+                        Err(e) => {
+                            decode_failures += 1;
+                            if decode_failures <= 3 {
+                                debug!("buffered audio: decode error: {e}");
+                            }
+                        }
                     }
                 }
             }
@@ -625,7 +631,7 @@ async fn buffered_audio(
             }
         }
     }
-    debug!("buffered audio disconnected ({decrypt_failures} decrypt failures, {skipped} skipped)");
+    debug!("buffered audio disconnected ({decrypt_failures} decrypt failures, {decode_failures} decode failures, {skipped} skipped)");
 }
 
 /// The `FLUSHBUFFERED` discard filter for still-arriving packets: skip while

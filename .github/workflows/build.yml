@@ -85,6 +85,7 @@ jobs:
           Copy-Item packaging/windows/install-usbip.ps1 staging/
           Copy-Item packaging/windows/find-usbip.ps1 staging/
           Copy-Item packaging/windows/run-usbip.ps1 staging/
+          Copy-Item packaging/windows/stop-running.ps1 staging/
           Copy-Item packaging/windows/rotating-log.ps1 staging/
           Copy-Item packaging/windows/test-playback.ps1 staging/
           Copy-Item packaging/windows/assets/test-tone.wav staging/
@@ -140,6 +141,20 @@ jobs:
           $finder = (Resolve-Path packaging/windows/find-usbip.ps1).Path.Replace("'", "''")
           $found32 = & $ps32 -NoProfile -ExecutionPolicy Bypass -Command ". '$finder'; Find-UsbipExecutable"
           if ($found32 -ne $usbip) { throw "32-bit PowerShell found '$found32' instead of '$usbip'" }
+          $probe = Start-Process -FilePath (Join-Path $folder 'win-airplay.exe') -ArgumentList 'usbip-input-probe' -PassThru -WindowStyle Hidden
+          try {
+            Start-Sleep -Seconds 1
+            if ($probe.HasExited) { throw 'Upgrade probe exited before the installer ran' }
+            $upgrade = Start-Process -FilePath $setup -ArgumentList '/S' -PassThru
+            if (-not $upgrade.WaitForExit(180000)) {
+              Stop-Process -Id $upgrade.Id -Force -ErrorAction SilentlyContinue
+              throw 'Silent Win AirPlay upgrade did not exit within three minutes'
+            }
+            if ($upgrade.ExitCode -ne 0) { throw "Silent Win AirPlay upgrade exited with $($upgrade.ExitCode)" }
+            if (Get-Process -Id $probe.Id -ErrorAction SilentlyContinue) { throw 'Upgrade left the old controller running' }
+          } finally {
+            Stop-Process -Id $probe.Id -Force -ErrorAction SilentlyContinue
+          }
           Write-Host "Bundled installer found USBip at $usbip"
       - uses: actions/upload-artifact@v4
         with:
@@ -183,6 +198,20 @@ jobs:
             if ($rule.Profile -ne 'Any' -or 'LocalSubnet' -notin $addresses) {
               throw "Receiver firewall rule does not allow local $protocol connections on all network profiles"
             }
+          }
+          $probe = Start-Process -FilePath (Join-Path $folder 'win-airplay.exe') -ArgumentList 'usbip-input-probe' -PassThru -WindowStyle Hidden
+          try {
+            Start-Sleep -Seconds 1
+            if ($probe.HasExited) { throw 'ARM64 upgrade probe exited before the installer ran' }
+            $upgrade = Start-Process -FilePath $setup -ArgumentList '/S' -PassThru
+            if (-not $upgrade.WaitForExit(180000)) {
+              Stop-Process -Id $upgrade.Id -Force -ErrorAction SilentlyContinue
+              throw 'Silent ARM64 upgrade did not exit within three minutes'
+            }
+            if ($upgrade.ExitCode -ne 0) { throw "Silent ARM64 upgrade exited with $($upgrade.ExitCode)" }
+            if (Get-Process -Id $probe.Id -ErrorAction SilentlyContinue) { throw 'ARM64 upgrade left the old controller running' }
+          } finally {
+            Stop-Process -Id $probe.Id -Force -ErrorAction SilentlyContinue
           }
           Write-Host "Bundled ARM64 installer found USBip at $usbip"
 

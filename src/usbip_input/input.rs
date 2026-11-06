@@ -2,7 +2,7 @@
 
 use super::{be32, string_descriptor, Device, DeviceState, EPIPE};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
@@ -18,6 +18,9 @@ pub struct CaptureInput {
     notification_ready: Condvar,
     pcm: Mutex<VecDeque<u8>>,
     packet_clock: Mutex<u32>,
+    underflow_bytes: AtomicU64,
+    overwritten_bytes: AtomicU64,
+    read_packets: AtomicU64,
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -25,6 +28,11 @@ impl CaptureInput {
     pub fn set_connected(&self, connected: bool) {
         if self.connected.swap(connected, Ordering::AcqRel) != connected {
             eprintln!("USB input connector state changed: connected={connected}");
+            if connected {
+                self.underflow_bytes.store(0, Ordering::Relaxed);
+                self.overwritten_bytes.store(0, Ordering::Relaxed);
+                self.read_packets.store(0, Ordering::Relaxed);
+            }
             self.changed.store(true, Ordering::Release);
             self.notification_ready.notify_all();
             if !connected {
@@ -38,9 +46,12 @@ impl CaptureInput {
         for sample in samples {
             pcm.extend(sample.to_le_bytes());
         }
-        while pcm.len() > MAX_PCM_BYTES {
+        let overwritten = pcm.len().saturating_sub(MAX_PCM_BYTES);
+        for _ in 0..overwritten {
             pcm.pop_front();
         }
+        self.overwritten_bytes
+            .fetch_add(overwritten as u64, Ordering::Relaxed);
     }
 
     pub fn clear(&self) {
@@ -49,7 +60,28 @@ impl CaptureInput {
 
     fn read(&self, len: usize) -> Vec<u8> {
         let mut pcm = self.pcm.lock().unwrap();
-        (0..len).map(|_| pcm.pop_front().unwrap_or(0)).collect()
+        let available = len.min(pcm.len());
+        let mut data = Vec::with_capacity(len);
+        for _ in 0..available {
+            data.push(pcm.pop_front().unwrap());
+        }
+        data.resize(len, 0);
+        let queued = pcm.len();
+        drop(pcm);
+        if self.connected.load(Ordering::Relaxed) {
+            self.underflow_bytes
+                .fetch_add((len - available) as u64, Ordering::Relaxed);
+            let packets = self.read_packets.fetch_add(1, Ordering::Relaxed) + 1;
+            if packets.is_multiple_of(10_000) {
+                eprintln!(
+                    "USB input audio: packets={packets} underflow_frames={} overwritten_frames={} queued_ms={}",
+                    self.underflow_bytes.load(Ordering::Relaxed) / 4,
+                    self.overwritten_bytes.load(Ordering::Relaxed) / 4,
+                    queued as u64 * 1000 / (u64::from(SAMPLE_RATE) * 4)
+                );
+            }
+        }
+        data
     }
 
     fn next_packet_bytes(&self) -> usize {

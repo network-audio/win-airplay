@@ -7,7 +7,7 @@ Win AirPlay adds discovered AirPlay 2 speakers to the standard Windows sound out
 ## Install
 
 1. Download the [Windows installer](https://github.com/network-audio/win-airplay/releases/latest) for your architecture (x64 or ARM64).
-2. Run it and approve the administrator prompt. It installs Win AirPlay and the bundled USBip client, then starts the controller at sign-in. Restart Windows if prompted.
+2. Run it and approve the administrator prompt. It stops any previous Win AirPlay controller before upgrading, installs the bundled USBip client if needed, then starts the controller at sign-in. Restart Windows if prompted.
 3. Select an AirPlay speaker in the Windows sound picker. To receive audio, select **`<computer name> Input`** as an AirPlay destination on a phone or Mac, then select its microphone in the Windows app that should capture it. Win AirPlay runs in the background with no separate app window. For a playback check, run `test-playback.ps1` from the install folder. Logs are at `%LOCALAPPDATA%\WinAirPlay\controller-usbip.log` and rotate at 1 MiB, retaining at most two files.
 
 ## How it works
