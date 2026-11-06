@@ -18,7 +18,7 @@ usbip-audio = { git = "https://github.com/stakach/usbip-audio", rev = "bd68b8d73
 capture = { path = "vendor/nyx-refrain/crates/capture" }
 if-addrs = "0.13"
 log = "0.4"
-openairplay2 = "=0.5.0"
+openairplay2 = { path = "vendor/openairplay2" }
 pipeline = { path = "vendor/nyx-refrain/crates/pipeline" }
 raop = { path = "vendor/nyx-refrain/crates/raop" }
 tokio = { version = "1.43", features = ["rt-multi-thread", "time", "sync"] }

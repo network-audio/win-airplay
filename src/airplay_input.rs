@@ -236,3 +236,50 @@ fn advertise(name: &str, hostname: &str, port: u16, records: Vec<String>) {
         std::thread::sleep(Duration::from_secs(5));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+
+    struct NullSink;
+
+    impl AudioSink for NullSink {
+        fn write(&mut self, _: &[i16]) {}
+        fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn receiver_accepts_ipv4_on_windows() {
+        let temporary = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = temporary.local_addr().unwrap().port();
+        drop(temporary);
+        let receiver = Receiver::builder()
+            .name("AirPlay IPv4 test")
+            .port(port)
+            .identity(Identity::generate())
+            .mac([2, 0, 0, 0, 0, 1])
+            .advertise(false)
+            .build()
+            .unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (events, _received) = tokio::sync::mpsc::unbounded_channel();
+        let server = runtime.spawn(receiver.run(|_, _| Box::new(NullSink), events));
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        for _ in 0..40 {
+            if TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
+                server.abort();
+                return;
+            }
+            if server.is_finished() {
+                panic!("AirPlay receiver stopped before accepting IPv4");
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        server.abort();
+        panic!("AirPlay receiver did not accept an IPv4 connection");
+    }
+}
