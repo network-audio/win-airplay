@@ -106,6 +106,19 @@ struct Speaker {
 }
 
 #[cfg(any(windows, test))]
+fn is_own_airplay_input(
+    speaker: &Speaker,
+    receiver_device_id: &str,
+    local_addresses: &[IpAddr],
+) -> bool {
+    speaker
+        .device_id
+        .as_deref()
+        .is_some_and(|id| id.eq_ignore_ascii_case(receiver_device_id))
+        || (speaker.port == 7000 && local_addresses.contains(&speaker.address))
+}
+
+#[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AudioEncoding {
     Pcm,
@@ -975,11 +988,17 @@ fn run_usbip_manager() -> Result<(), String> {
                     }
                     let raop_codecs: BTreeMap<IpAddr, Vec<u8>> =
                         known_raop.values().flatten().cloned().collect();
+                    let local_addresses: Vec<IpAddr> = addresses
+                        .as_ref()
+                        .into_iter()
+                        .flatten()
+                        .map(|(_, address)| *address)
+                        .collect();
                     let reachable: Vec<Speaker> = known
                         .values()
                         .flatten()
                         .filter(|speaker| {
-                            speaker.device_id.as_deref() != Some(receiver_device_id.as_str())
+                            !is_own_airplay_input(speaker, &receiver_device_id, &local_addresses)
                         })
                         .map(|speaker| {
                             let mut speaker = speaker.clone();
@@ -1293,6 +1312,29 @@ mod tests {
         speaker.device_id = Some("aa:bb:cc:dd:ee:ff".into());
         assert_eq!(speaker_key(&speaker), key);
         assert_eq!(key.len(), 32);
+    }
+
+    #[test]
+    fn local_airplay_input_cannot_become_a_speaker_output() {
+        let local = "192.0.2.10".parse().unwrap();
+        let mut speaker = Speaker {
+            name: "Laptop Input".into(),
+            address: local,
+            port: 7000,
+            service: SERVICE_TYPES[0].into(),
+            model: None,
+            device_id: Some("aa:bb:cc:dd:ee:ff".into()),
+            codecs: vec![],
+            low_latency_audio: false,
+        };
+        assert!(is_own_airplay_input(&speaker, "AA:BB:CC:DD:EE:FF", &[]));
+        speaker.device_id = None;
+        assert!(is_own_airplay_input(&speaker, "other-id", &[local]));
+        speaker.address = "192.0.2.11".parse().unwrap();
+        assert!(!is_own_airplay_input(&speaker, "other-id", &[local]));
+        speaker.address = local;
+        speaker.port = 7001;
+        assert!(!is_own_airplay_input(&speaker, "other-id", &[local]));
     }
 
     #[test]

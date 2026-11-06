@@ -1,6 +1,6 @@
 # Win AirPlay
 
-Win AirPlay adds discovered AirPlay 2 speakers to the standard Windows sound output picker. Select a speaker to send Windows audio to it. It also advertises **`<computer name> Input`** as an AirPlay 2 receiver and exposes incoming audio as a Windows microphone. The input appears unplugged until an AirPlay session starts, then becomes active. The controller does not switch your default output.
+Win AirPlay adds discovered AirPlay 2 speakers to the standard Windows sound output picker. Select a speaker to send Windows audio to it. It also advertises **`<computer name> Input`** as an AirPlay 2 receiver and exposes incoming audio as a Windows microphone. The input appears unplugged until an AirPlay session starts, then becomes active. The input is excluded from local speaker outputs to prevent feedback loops. The controller does not switch your default output.
 
 <img width="300" alt="Windows sound output" src="https://github.com/user-attachments/assets/9803736c-e54c-436c-a61f-c6c389563071" />
 
