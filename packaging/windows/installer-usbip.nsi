@@ -18,8 +18,8 @@ Name "Win AirPlay USB/IP"
 OutFile "${OUT_FILE}"
 InstallDir "$PROGRAMFILES64\Win AirPlay USBIP"
 RequestExecutionLevel admin
-VIProductVersion "1.2.1.0"
-VIAddVersionKey "ProductVersion" "1.2.1"
+VIProductVersion "1.2.2.0"
+VIAddVersionKey "ProductVersion" "1.2.2"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
@@ -37,11 +37,21 @@ Section "Win AirPlay USB/IP" Main
     Abort
   ${EndIf}
   SetRegView 64
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR"
+  File /oname=stop-running.ps1 "${DIST_DIR}\stop-running.ps1"
+  nsExec::ExecToLog '"$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\stop-running.ps1" -InstallDir "$INSTDIR"'
+  Pop $0
+  ${If} $0 != 0
+    MessageBox MB_ICONSTOP "Could not stop the previous Win AirPlay installation." /SD IDOK
+    Abort
+  ${EndIf}
   SetOutPath "$INSTDIR"
   File "${DIST_DIR}\win-airplay.exe"
   File "${DIST_DIR}\install-usbip.ps1"
   File "${DIST_DIR}\find-usbip.ps1"
   File "${DIST_DIR}\run-usbip.ps1"
+  File "${DIST_DIR}\stop-running.ps1"
   File "${DIST_DIR}\rotating-log.ps1"
   File "${DIST_DIR}\test-playback.ps1"
   File "${DIST_DIR}\test-tone.wav"
@@ -60,7 +70,7 @@ Section "Win AirPlay USB/IP" Main
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\WinAirPlayUSBIP" "DisplayName" "Win AirPlay USB/IP"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\WinAirPlayUSBIP" "DisplayVersion" "1.2.1"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\WinAirPlayUSBIP" "DisplayVersion" "1.2.2"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\WinAirPlayUSBIP" "UninstallString" '"$INSTDIR\Uninstall.exe"'
 SectionEnd
 
@@ -72,6 +82,7 @@ Section "Uninstall"
   Delete "$INSTDIR\find-usbip.ps1"
   Delete "$INSTDIR\usbip-path.txt"
   Delete "$INSTDIR\run-usbip.ps1"
+  Delete "$INSTDIR\stop-running.ps1"
   Delete "$INSTDIR\rotating-log.ps1"
   Delete "$INSTDIR\test-playback.ps1"
   Delete "$INSTDIR\test-tone.wav"

@@ -7,7 +7,7 @@ $folder = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $folder 'find-usbip.ps1')
 
 if ($Action -eq 'Uninstall') {
-    Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    & (Join-Path $folder 'stop-running.ps1') -InstallDir $folder
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
     Get-NetFirewallRule -DisplayName 'Win AirPlay Receiver *' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
     exit 0

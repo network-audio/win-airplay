@@ -356,6 +356,14 @@ fn serve_imported(stream: &mut TcpStream, device: &Device, stop: &AtomicBool) ->
                         })?;
                     continue;
                 }
+                if ep == 1 && direction == 1 && packets > 0 && packets != u32::MAX {
+                    // Windows can queue capture URBs ahead of real time. Wait
+                    // before taking PCM so a future USB request cannot drain
+                    // audio that has not arrived from AirPlay yet.
+                    let now = Instant::now();
+                    next_audio_due = next_iso_deadline(next_audio_due, now, packets);
+                    thread::sleep(next_audio_due.saturating_duration_since(now));
+                }
                 let setup: [u8; 8] = header[40..48].try_into().unwrap();
                 let (status, data, actual, iso_reply) =
                     handle_submit(device, ep, direction, setup, length, &payload, &iso);
@@ -383,11 +391,6 @@ fn serve_imported(stream: &mut TcpStream, device: &Device, stop: &AtomicBool) ->
                 out.extend_from_slice(&[0; 8]);
                 out.extend_from_slice(&data);
                 out.extend_from_slice(&iso_reply);
-                if ep == 1 && packets > 0 && packets != u32::MAX {
-                    let now = std::time::Instant::now();
-                    next_audio_due = next_iso_deadline(next_audio_due, now, packets);
-                    thread::sleep(next_audio_due.saturating_duration_since(now));
-                }
                 writer.lock().unwrap().write_all(&out)?;
             }
             2 => {

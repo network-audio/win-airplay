@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 const PORT: u16 = 7000;
 const SERVICE: &str = "_airplay._tcp.local.";
+const CAPTURE_HEADROOM: Duration = Duration::from_millis(80);
 
 struct ReceiverLogger;
 static RECEIVER_LOGGER: ReceiverLogger = ReceiverLogger;
@@ -22,7 +23,8 @@ impl Log for ReceiverLogger {
             && (metadata.level() <= Level::Warn
                 || (metadata.level() <= Level::Debug
                     && (metadata.target() == "openairplay2::server"
-                        || metadata.target() == "openairplay2::pairing")))
+                        || metadata.target() == "openairplay2::pairing"
+                        || metadata.target() == "openairplay2::session")))
     }
 
     fn log(&self, record: &Record<'_>) {
@@ -33,6 +35,14 @@ impl Log for ReceiverLogger {
         // The receiver's request logger also emits pairing headers and bodies.
         // Keep only the protocol steps and errors in the user's rotating log.
         if message.contains("]   ") {
+            return;
+        }
+        if record.level() == Level::Debug
+            && record.target() == "openairplay2::session"
+            && !message.starts_with("SETUP phase 2: type=")
+            && !message.starts_with("buffered audio connected")
+            && !message.starts_with("buffered audio disconnected")
+        {
             return;
         }
         eprintln!("AirPlay input {}: {message}", record.level());
@@ -79,13 +89,17 @@ impl AudioSink for UsbInputSink {
         }
         let frames = samples.len() / usize::from(self.channels);
         let duration = Duration::from_secs_f64(frames as f64 / f64::from(self.rate));
-        self.next_due = self.next_due.max(Instant::now()) + duration;
+        // Build a small PCM cushion before pacing the sender. USB capture
+        // requests and AirPlay decoder writes run on independent clocks.
+        let earliest = Instant::now().checked_sub(CAPTURE_HEADROOM).unwrap();
+        self.next_due = self.next_due.max(earliest) + duration;
         std::thread::sleep(self.next_due.saturating_duration_since(Instant::now()));
     }
 
     fn flush(&mut self) {
         self.input.clear();
-        self.next_due = Instant::now();
+        let now = Instant::now();
+        self.next_due = now.checked_sub(CAPTURE_HEADROOM).unwrap_or(now);
     }
 }
 
@@ -165,7 +179,10 @@ pub fn start(input: Arc<CaptureInput>) -> Result<String, String> {
                                 input: sink_input.clone(),
                                 rate,
                                 channels,
-                                next_due: Instant::now(),
+                                next_due: {
+                                    let now = Instant::now();
+                                    now.checked_sub(CAPTURE_HEADROOM).unwrap_or(now)
+                                },
                                 gain: sink_gain.clone(),
                             })
                         },
@@ -216,9 +233,6 @@ fn advertise(name: &str, hostname: &str, port: u16, records: Vec<String>, active
         current.sort();
         current.dedup();
         if current != previous {
-            if !previous.is_empty() {
-                let _ = mdns.unregister(&fullname);
-            }
             if !current.is_empty() {
                 match ServiceInfo::new(
                     SERVICE,
@@ -233,12 +247,18 @@ fn advertise(name: &str, hostname: &str, port: u16, records: Vec<String>, active
                             eprintln!("Could not advertise AirPlay input: {error}");
                         } else {
                             println!("AirPlay input mDNS addresses: {current:?}");
+                            previous = current;
                         }
                     }
                     Err(error) => eprintln!("AirPlay input mDNS record: {error}"),
                 }
+            } else if !previous.is_empty() {
+                if let Err(error) = mdns.unregister(&fullname) {
+                    eprintln!("Could not withdraw AirPlay input: {error}");
+                } else {
+                    previous.clear();
+                }
             }
-            previous = current;
         }
         std::thread::sleep(Duration::from_secs(5));
     }
