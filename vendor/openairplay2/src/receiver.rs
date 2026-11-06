@@ -228,6 +228,21 @@ impl Receiver {
     where
         F: Fn(u32, u8) -> Box<dyn AudioSink> + Send + Sync + 'static,
     {
+        self.run_with_ready(sink_factory, events, || {}).await
+    }
+
+    /// Serve AirPlay and call `ready` once the control listener is bound.
+    /// Embedders can wait for this before publishing their own mDNS record.
+    pub async fn run_with_ready<F, R>(
+        self,
+        sink_factory: F,
+        events: EventSender,
+        ready: R,
+    ) -> io::Result<()>
+    where
+        F: Fn(u32, u8) -> Box<dyn AudioSink> + Send + Sync + 'static,
+        R: FnOnce() + Send + 'static,
+    {
         let port = self.config.port;
         // Windows defaults IPV6_V6ONLY to true. Binding [::] can succeed while
         // leaving the advertised IPv4 address unreachable to AirPlay senders.
@@ -248,6 +263,7 @@ impl Receiver {
                         io::Error::new(e.kind(), format!("cannot bind control port {port}: {e}"))
                     })?,
             };
+        ready();
 
         let _advertisement = if self.advertise {
             let records = self.txt_records();

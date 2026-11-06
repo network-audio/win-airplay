@@ -6,7 +6,7 @@ use mdns_sd::{ServiceDaemon, ServiceInfo};
 use openairplay2::{AudioSink, Event, Identity, Receiver};
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -113,12 +113,9 @@ pub fn start(input: Arc<CaptureInput>) -> Result<String, String> {
     let device_id = receiver.config().device_id();
     let txt = receiver.txt_records();
     let hostname = format!("win-airplay-{:02x}{:02x}.local.", mac[4], mac[5]);
-    println!("AirPlay input advertising {name} on TCP port {PORT}");
-    let advertised_name = name.clone();
-    std::thread::Builder::new()
-        .name("airplay-input-mdns".into())
-        .spawn(move || advertise(&advertised_name, &hostname, PORT, txt))
-        .map_err(|error| error.to_string())?;
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let active = Arc::new(AtomicBool::new(true));
+    let receiver_active = active.clone();
     std::thread::Builder::new()
         .name("airplay-input-receiver".into())
         .spawn(move || {
@@ -162,7 +159,7 @@ pub fn start(input: Arc<CaptureInput>) -> Result<String, String> {
                 let sink_input = input.clone();
                 let sink_gain = gain.clone();
                 if let Err(error) = receiver
-                    .run(
+                    .run_with_ready(
                         move |rate, channels| {
                             Box::new(UsbInputSink {
                                 input: sink_input.clone(),
@@ -173,19 +170,29 @@ pub fn start(input: Arc<CaptureInput>) -> Result<String, String> {
                             })
                         },
                         events,
+                        move || { let _ = ready_tx.send(()); },
                     )
                     .await
                 {
                     eprintln!("AirPlay input receiver stopped: {error}");
                     input.set_connected(false);
                 }
+                receiver_active.store(false, Ordering::Release);
             });
         })
+        .map_err(|error| error.to_string())?;
+    ready_rx
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|error| format!("AirPlay input listener did not start on port {PORT}: {error}"))?;
+    println!("AirPlay input advertising {name} on TCP port {PORT}");
+    std::thread::Builder::new()
+        .name("airplay-input-mdns".into())
+        .spawn(move || advertise(&name, &hostname, PORT, txt, active))
         .map_err(|error| error.to_string())?;
     Ok(device_id)
 }
 
-fn advertise(name: &str, hostname: &str, port: u16, records: Vec<String>) {
+fn advertise(name: &str, hostname: &str, port: u16, records: Vec<String>, active: Arc<AtomicBool>) {
     let mdns = match ServiceDaemon::new() {
         Ok(mdns) => mdns,
         Err(error) => {
@@ -200,7 +207,7 @@ fn advertise(name: &str, hostname: &str, port: u16, records: Vec<String>) {
         .collect();
     let mut previous = Vec::<IpAddr>::new();
     let fullname = format!("{name}.{SERVICE}");
-    loop {
+    while active.load(Ordering::Acquire) {
         let mut current: Vec<IpAddr> = super::network_addresses()
             .unwrap_or_default()
             .into_iter()
@@ -234,6 +241,9 @@ fn advertise(name: &str, hostname: &str, port: u16, records: Vec<String>) {
             previous = current;
         }
         std::thread::sleep(Duration::from_secs(5));
+    }
+    if !previous.is_empty() {
+        let _ = mdns.unregister(&fullname);
     }
 }
 
