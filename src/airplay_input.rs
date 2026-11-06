@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 const PORT: u16 = 7000;
 const SERVICE: &str = "_airplay._tcp.local.";
 const CAPTURE_HEADROOM: Duration = Duration::from_millis(80);
+const MDNS_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(20);
 
 struct ReceiverLogger;
 static RECEIVER_LOGGER: ReceiverLogger = ReceiverLogger;
@@ -223,6 +224,7 @@ fn advertise(name: &str, hostname: &str, port: u16, records: Vec<String>, active
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
         .collect();
     let mut previous = Vec::<IpAddr>::new();
+    let mut last_announcement: Option<Instant> = None;
     let fullname = format!("{name}.{SERVICE}");
     while active.load(Ordering::Acquire) {
         let mut current: Vec<IpAddr> = super::network_addresses()
@@ -232,7 +234,10 @@ fn advertise(name: &str, hostname: &str, port: u16, records: Vec<String>, active
             .collect();
         current.sort();
         current.dedup();
-        if current != previous {
+        let addresses_changed = current != previous;
+        if addresses_changed
+            || last_announcement.is_none_or(|at| at.elapsed() >= MDNS_ANNOUNCE_INTERVAL)
+        {
             if !current.is_empty() {
                 match ServiceInfo::new(
                     SERVICE,
@@ -246,8 +251,11 @@ fn advertise(name: &str, hostname: &str, port: u16, records: Vec<String>, active
                         if let Err(error) = mdns.register(info) {
                             eprintln!("Could not advertise AirPlay input: {error}");
                         } else {
-                            println!("AirPlay input mDNS addresses: {current:?}");
+                            if addresses_changed {
+                                println!("AirPlay input mDNS addresses: {current:?}");
+                            }
                             previous = current;
+                            last_announcement = Some(Instant::now());
                         }
                     }
                     Err(error) => eprintln!("AirPlay input mDNS record: {error}"),
@@ -257,6 +265,7 @@ fn advertise(name: &str, hostname: &str, port: u16, records: Vec<String>, active
                     eprintln!("Could not withdraw AirPlay input: {error}");
                 } else {
                     previous.clear();
+                    last_announcement = None;
                 }
             }
         }
