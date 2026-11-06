@@ -111,10 +111,11 @@ fn is_own_airplay_input(
     receiver_device_id: &str,
     local_addresses: &[IpAddr],
 ) -> bool {
-    speaker
-        .device_id
-        .as_deref()
-        .is_some_and(|id| id.eq_ignore_ascii_case(receiver_device_id))
+    (!receiver_device_id.is_empty()
+        && speaker
+            .device_id
+            .as_deref()
+            .is_some_and(|id| id.eq_ignore_ascii_case(receiver_device_id)))
         || (speaker.port == 7000 && local_addresses.contains(&speaker.address))
 }
 
@@ -614,9 +615,17 @@ fn run_manager() -> Result<(), String> {
     std::thread::spawn(move || loop {
         match discover(4) {
             Ok(speakers) => {
+                let local_addresses: Vec<IpAddr> = network_addresses()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(_, address)| address)
+                    .collect();
                 let reachable: Vec<_> = speakers
                     .into_iter()
                     .filter(|speaker| {
+                        if is_own_airplay_input(speaker, "", &local_addresses) {
+                            return false;
+                        }
                         let address = SocketAddr::new(speaker.address, speaker.port);
                         std::net::TcpStream::connect_timeout(&address, Duration::from_millis(400))
                             .is_ok()
