@@ -1662,11 +1662,12 @@ dependencies = [
 
 [[package]]
 name = "win-airplay"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "capture",
  "clap",
  "if-addrs",
+ "log",
  "mdns-sd",
  "openairplay2",
  "pipeline",

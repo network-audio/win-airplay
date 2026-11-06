@@ -1,6 +1,6 @@
 [package]
 name = "win-airplay"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2021"
 license = "MIT"
 description = "AirPlay 2 discovery and Windows audio sender controller"
@@ -17,6 +17,7 @@ usbip-audio = { git = "https://github.com/stakach/usbip-audio", rev = "bd68b8d73
 [target.'cfg(windows)'.dependencies]
 capture = { path = "vendor/nyx-refrain/crates/capture" }
 if-addrs = "0.13"
+log = "0.4"
 openairplay2 = "=0.5.0"
 pipeline = { path = "vendor/nyx-refrain/crates/pipeline" }
 raop = { path = "vendor/nyx-refrain/crates/raop" }

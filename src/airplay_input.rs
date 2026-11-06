@@ -1,6 +1,7 @@
 //! AirPlay 2 receiver feeding the virtual USB capture endpoint.
 
 use crate::usbip_input::CaptureInput;
+use log::{Level, LevelFilter, Log, Metadata, Record};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use openairplay2::{AudioSink, Event, Identity, Receiver};
 use std::collections::HashMap;
@@ -9,9 +10,49 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const NAME: &str = "Win AirPlay Input";
 const PORT: u16 = 7000;
 const SERVICE: &str = "_airplay._tcp.local.";
+
+struct ReceiverLogger;
+static RECEIVER_LOGGER: ReceiverLogger = ReceiverLogger;
+
+impl Log for ReceiverLogger {
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        metadata.target().starts_with("openairplay2::")
+            && (metadata.level() <= Level::Warn
+                || (metadata.level() <= Level::Debug
+                    && (metadata.target() == "openairplay2::server"
+                        || metadata.target() == "openairplay2::pairing")))
+    }
+
+    fn log(&self, record: &Record<'_>) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        let message = record.args().to_string();
+        // The receiver's request logger also emits pairing headers and bodies.
+        // Keep only the protocol steps and errors in the user's rotating log.
+        if message.contains("]   ") {
+            return;
+        }
+        eprintln!("AirPlay input {}: {message}", record.level());
+    }
+
+    fn flush(&self) {}
+}
+
+fn receiver_name() -> String {
+    let computer = std::env::var("COMPUTERNAME")
+        .ok()
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| {
+            std::env::var("HOSTNAME")
+                .ok()
+                .filter(|name| !name.trim().is_empty())
+        })
+        .unwrap_or_else(|| "Win AirPlay".into());
+    format!("{} Input", computer.trim())
+}
 
 struct UsbInputSink {
     input: Arc<CaptureInput>,
@@ -49,6 +90,10 @@ impl AudioSink for UsbInputSink {
 }
 
 pub fn start(input: Arc<CaptureInput>) -> Result<String, String> {
+    if log::set_logger(&RECEIVER_LOGGER).is_ok() {
+        log::set_max_level(LevelFilter::Debug);
+    }
+    let name = receiver_name();
     let home = std::env::var_os("LOCALAPPDATA")
         .ok_or("LOCALAPPDATA is unavailable for the AirPlay receiver identity")?;
     let folder = std::path::PathBuf::from(home).join("WinAirPlay");
@@ -58,7 +103,7 @@ pub fn start(input: Arc<CaptureInput>) -> Result<String, String> {
     let key = identity.public_key();
     let mac = [key[0] & 0xfe | 0x02, key[1], key[2], key[3], key[4], key[5]];
     let receiver = Receiver::builder()
-        .name(NAME)
+        .name(name.clone())
         .port(PORT)
         .identity(identity)
         .mac(mac)
@@ -68,9 +113,11 @@ pub fn start(input: Arc<CaptureInput>) -> Result<String, String> {
     let device_id = receiver.config().device_id();
     let txt = receiver.txt_records();
     let hostname = format!("win-airplay-{:02x}{:02x}.local.", mac[4], mac[5]);
+    println!("AirPlay input advertising {name} on TCP port {PORT}");
+    let advertised_name = name.clone();
     std::thread::Builder::new()
         .name("airplay-input-mdns".into())
-        .spawn(move || advertise(NAME, &hostname, PORT, txt))
+        .spawn(move || advertise(&advertised_name, &hostname, PORT, txt))
         .map_err(|error| error.to_string())?;
     std::thread::Builder::new()
         .name("airplay-input-receiver".into())
@@ -177,6 +224,8 @@ fn advertise(name: &str, hostname: &str, port: u16, records: Vec<String>) {
                     Ok(info) => {
                         if let Err(error) = mdns.register(info) {
                             eprintln!("Could not advertise AirPlay input: {error}");
+                        } else {
+                            println!("AirPlay input mDNS addresses: {current:?}");
                         }
                     }
                     Err(error) => eprintln!("AirPlay input mDNS record: {error}"),
