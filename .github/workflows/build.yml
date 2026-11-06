@@ -79,6 +79,8 @@ jobs:
           $actual = (Get-FileHash -Algorithm SHA256 $upstream).Hash.ToLowerInvariant()
           if ($actual -ne $expected) { throw "USBip release checksum mismatch: $actual" }
           Copy-Item vendor/nyx-refrain/LICENSE staging/NYX-LICENSE.txt
+          Copy-Item vendor/openairplay2/LICENSE staging/OPENAIRPLAY2-LICENSE.txt
+          Copy-Item vendor/openairplay2/NOTICE.md staging/OPENAIRPLAY2-NOTICE.md
           Copy-Item packaging/windows/USBIP-LICENSE.txt staging/
           Copy-Item packaging/windows/install-usbip.ps1 staging/
           Copy-Item packaging/windows/find-usbip.ps1 staging/
