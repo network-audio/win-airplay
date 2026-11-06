@@ -50,7 +50,7 @@ if (-not $usbip) {
 
 Get-NetFirewallRule -DisplayName 'Win AirPlay Receiver *' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
 foreach ($protocol in @('TCP', 'UDP')) {
-    New-NetFirewallRule -DisplayName "Win AirPlay Receiver $protocol" -Direction Inbound -Action Allow -Profile Private -Program (Join-Path $folder 'win-airplay.exe') -Protocol $protocol | Out-Null
+    New-NetFirewallRule -DisplayName "Win AirPlay Receiver $protocol" -Direction Inbound -Action Allow -Profile Any -RemoteAddress LocalSubnet -Program (Join-Path $folder 'win-airplay.exe') -Protocol $protocol | Out-Null
 }
 
 $launcher = Join-Path $folder 'run-usbip.ps1'

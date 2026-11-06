@@ -18,8 +18,8 @@ Name "Win AirPlay USB/IP"
 OutFile "${OUT_FILE}"
 InstallDir "$PROGRAMFILES64\Win AirPlay USBIP"
 RequestExecutionLevel admin
-VIProductVersion "1.2.0.0"
-VIAddVersionKey "ProductVersion" "1.2.0"
+VIProductVersion "1.2.1.0"
+VIAddVersionKey "ProductVersion" "1.2.1"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
@@ -46,6 +46,8 @@ Section "Win AirPlay USB/IP" Main
   File "${DIST_DIR}\test-playback.ps1"
   File "${DIST_DIR}\test-tone.wav"
   File "${DIST_DIR}\NYX-LICENSE.txt"
+  File "${DIST_DIR}\OPENAIRPLAY2-LICENSE.txt"
+  File "${DIST_DIR}\OPENAIRPLAY2-NOTICE.md"
   File "${DIST_DIR}\USBIP-LICENSE.txt"
   File "${DIST_DIR}\USBip-0.9.8.1-${USBIP_ARCH}.exe"
 
@@ -58,7 +60,7 @@ Section "Win AirPlay USB/IP" Main
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\WinAirPlayUSBIP" "DisplayName" "Win AirPlay USB/IP"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\WinAirPlayUSBIP" "DisplayVersion" "1.2.0"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\WinAirPlayUSBIP" "DisplayVersion" "1.2.1"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\WinAirPlayUSBIP" "UninstallString" '"$INSTDIR\Uninstall.exe"'
 SectionEnd
 
@@ -74,6 +76,8 @@ Section "Uninstall"
   Delete "$INSTDIR\test-playback.ps1"
   Delete "$INSTDIR\test-tone.wav"
   Delete "$INSTDIR\NYX-LICENSE.txt"
+  Delete "$INSTDIR\OPENAIRPLAY2-LICENSE.txt"
+  Delete "$INSTDIR\OPENAIRPLAY2-NOTICE.md"
   Delete "$INSTDIR\USBIP-LICENSE.txt"
   Delete "$INSTDIR\USBip-0.9.8.1-${USBIP_ARCH}.exe"
   Delete "$INSTDIR\Uninstall.exe"

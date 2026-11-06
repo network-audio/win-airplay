@@ -79,6 +79,8 @@ jobs:
           $actual = (Get-FileHash -Algorithm SHA256 $upstream).Hash.ToLowerInvariant()
           if ($actual -ne $expected) { throw "USBip release checksum mismatch: $actual" }
           Copy-Item vendor/nyx-refrain/LICENSE staging/NYX-LICENSE.txt
+          Copy-Item vendor/openairplay2/LICENSE staging/OPENAIRPLAY2-LICENSE.txt
+          Copy-Item vendor/openairplay2/NOTICE.md staging/OPENAIRPLAY2-NOTICE.md
           Copy-Item packaging/windows/USBIP-LICENSE.txt staging/
           Copy-Item packaging/windows/install-usbip.ps1 staging/
           Copy-Item packaging/windows/find-usbip.ps1 staging/
@@ -127,6 +129,13 @@ jobs:
           if (-not (Test-Path -LiteralPath $usbip -PathType Leaf)) { throw "USBip executable is missing: $usbip" }
           $task = Get-ScheduledTask -TaskName 'Win AirPlay USBIP'
           if ($task.Actions.Arguments -notmatch '-WindowStyle Hidden') { throw 'Controller task is not hidden' }
+          foreach ($protocol in @('TCP', 'UDP')) {
+            $rule = Get-NetFirewallRule -DisplayName "Win AirPlay Receiver $protocol" -ErrorAction Stop
+            $addresses = @(($rule | Get-NetFirewallAddressFilter).RemoteAddress)
+            if ($rule.Profile -ne 'Any' -or 'LocalSubnet' -notin $addresses) {
+              throw "Receiver firewall rule does not allow local $protocol connections on all network profiles"
+            }
+          }
           $ps32 = Join-Path $env:WINDIR 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'
           $finder = (Resolve-Path packaging/windows/find-usbip.ps1).Path.Replace("'", "''")
           $found32 = & $ps32 -NoProfile -ExecutionPolicy Bypass -Command ". '$finder'; Find-UsbipExecutable"
@@ -168,6 +177,13 @@ jobs:
           if (-not (Test-Path -LiteralPath $usbip -PathType Leaf)) { throw "USBip executable is missing: $usbip" }
           $task = Get-ScheduledTask -TaskName 'Win AirPlay USBIP'
           if ($task.Actions.Arguments -notmatch '-WindowStyle Hidden') { throw 'Controller task is not hidden' }
+          foreach ($protocol in @('TCP', 'UDP')) {
+            $rule = Get-NetFirewallRule -DisplayName "Win AirPlay Receiver $protocol" -ErrorAction Stop
+            $addresses = @(($rule | Get-NetFirewallAddressFilter).RemoteAddress)
+            if ($rule.Profile -ne 'Any' -or 'LocalSubnet' -notin $addresses) {
+              throw "Receiver firewall rule does not allow local $protocol connections on all network profiles"
+            }
+          }
           Write-Host "Bundled ARM64 installer found USBip at $usbip"
 
   usbip-windows-smoke:

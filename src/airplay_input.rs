@@ -1,17 +1,58 @@
 //! AirPlay 2 receiver feeding the virtual USB capture endpoint.
 
 use crate::usbip_input::CaptureInput;
+use log::{Level, LevelFilter, Log, Metadata, Record};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use openairplay2::{AudioSink, Event, Identity, Receiver};
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const NAME: &str = "Win AirPlay Input";
 const PORT: u16 = 7000;
 const SERVICE: &str = "_airplay._tcp.local.";
+
+struct ReceiverLogger;
+static RECEIVER_LOGGER: ReceiverLogger = ReceiverLogger;
+
+impl Log for ReceiverLogger {
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        metadata.target().starts_with("openairplay2::")
+            && (metadata.level() <= Level::Warn
+                || (metadata.level() <= Level::Debug
+                    && (metadata.target() == "openairplay2::server"
+                        || metadata.target() == "openairplay2::pairing")))
+    }
+
+    fn log(&self, record: &Record<'_>) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        let message = record.args().to_string();
+        // The receiver's request logger also emits pairing headers and bodies.
+        // Keep only the protocol steps and errors in the user's rotating log.
+        if message.contains("]   ") {
+            return;
+        }
+        eprintln!("AirPlay input {}: {message}", record.level());
+    }
+
+    fn flush(&self) {}
+}
+
+fn receiver_name() -> String {
+    let computer = std::env::var("COMPUTERNAME")
+        .ok()
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| {
+            std::env::var("HOSTNAME")
+                .ok()
+                .filter(|name| !name.trim().is_empty())
+        })
+        .unwrap_or_else(|| "Win AirPlay".into());
+    format!("{} Input", computer.trim())
+}
 
 struct UsbInputSink {
     input: Arc<CaptureInput>,
@@ -49,6 +90,10 @@ impl AudioSink for UsbInputSink {
 }
 
 pub fn start(input: Arc<CaptureInput>) -> Result<String, String> {
+    if log::set_logger(&RECEIVER_LOGGER).is_ok() {
+        log::set_max_level(LevelFilter::Debug);
+    }
+    let name = receiver_name();
     let home = std::env::var_os("LOCALAPPDATA")
         .ok_or("LOCALAPPDATA is unavailable for the AirPlay receiver identity")?;
     let folder = std::path::PathBuf::from(home).join("WinAirPlay");
@@ -58,7 +103,7 @@ pub fn start(input: Arc<CaptureInput>) -> Result<String, String> {
     let key = identity.public_key();
     let mac = [key[0] & 0xfe | 0x02, key[1], key[2], key[3], key[4], key[5]];
     let receiver = Receiver::builder()
-        .name(NAME)
+        .name(name.clone())
         .port(PORT)
         .identity(identity)
         .mac(mac)
@@ -68,10 +113,9 @@ pub fn start(input: Arc<CaptureInput>) -> Result<String, String> {
     let device_id = receiver.config().device_id();
     let txt = receiver.txt_records();
     let hostname = format!("win-airplay-{:02x}{:02x}.local.", mac[4], mac[5]);
-    std::thread::Builder::new()
-        .name("airplay-input-mdns".into())
-        .spawn(move || advertise(NAME, &hostname, PORT, txt))
-        .map_err(|error| error.to_string())?;
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let active = Arc::new(AtomicBool::new(true));
+    let receiver_active = active.clone();
     std::thread::Builder::new()
         .name("airplay-input-receiver".into())
         .spawn(move || {
@@ -115,7 +159,7 @@ pub fn start(input: Arc<CaptureInput>) -> Result<String, String> {
                 let sink_input = input.clone();
                 let sink_gain = gain.clone();
                 if let Err(error) = receiver
-                    .run(
+                    .run_with_ready(
                         move |rate, channels| {
                             Box::new(UsbInputSink {
                                 input: sink_input.clone(),
@@ -126,19 +170,29 @@ pub fn start(input: Arc<CaptureInput>) -> Result<String, String> {
                             })
                         },
                         events,
+                        move || { let _ = ready_tx.send(()); },
                     )
                     .await
                 {
                     eprintln!("AirPlay input receiver stopped: {error}");
                     input.set_connected(false);
                 }
+                receiver_active.store(false, Ordering::Release);
             });
         })
+        .map_err(|error| error.to_string())?;
+    ready_rx
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|error| format!("AirPlay input listener did not start on port {PORT}: {error}"))?;
+    println!("AirPlay input advertising {name} on TCP port {PORT}");
+    std::thread::Builder::new()
+        .name("airplay-input-mdns".into())
+        .spawn(move || advertise(&name, &hostname, PORT, txt, active))
         .map_err(|error| error.to_string())?;
     Ok(device_id)
 }
 
-fn advertise(name: &str, hostname: &str, port: u16, records: Vec<String>) {
+fn advertise(name: &str, hostname: &str, port: u16, records: Vec<String>, active: Arc<AtomicBool>) {
     let mdns = match ServiceDaemon::new() {
         Ok(mdns) => mdns,
         Err(error) => {
@@ -153,7 +207,7 @@ fn advertise(name: &str, hostname: &str, port: u16, records: Vec<String>) {
         .collect();
     let mut previous = Vec::<IpAddr>::new();
     let fullname = format!("{name}.{SERVICE}");
-    loop {
+    while active.load(Ordering::Acquire) {
         let mut current: Vec<IpAddr> = super::network_addresses()
             .unwrap_or_default()
             .into_iter()
@@ -177,6 +231,8 @@ fn advertise(name: &str, hostname: &str, port: u16, records: Vec<String>) {
                     Ok(info) => {
                         if let Err(error) = mdns.register(info) {
                             eprintln!("Could not advertise AirPlay input: {error}");
+                        } else {
+                            println!("AirPlay input mDNS addresses: {current:?}");
                         }
                     }
                     Err(error) => eprintln!("AirPlay input mDNS record: {error}"),
@@ -185,5 +241,55 @@ fn advertise(name: &str, hostname: &str, port: u16, records: Vec<String>) {
             previous = current;
         }
         std::thread::sleep(Duration::from_secs(5));
+    }
+    if !previous.is_empty() {
+        let _ = mdns.unregister(&fullname);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+
+    struct NullSink;
+
+    impl AudioSink for NullSink {
+        fn write(&mut self, _: &[i16]) {}
+        fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn receiver_accepts_ipv4_on_windows() {
+        let temporary = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = temporary.local_addr().unwrap().port();
+        drop(temporary);
+        let receiver = Receiver::builder()
+            .name("AirPlay IPv4 test")
+            .port(port)
+            .identity(Identity::generate())
+            .mac([2, 0, 0, 0, 0, 1])
+            .advertise(false)
+            .build()
+            .unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (events, _received) = tokio::sync::mpsc::unbounded_channel();
+        let server = runtime.spawn(receiver.run(|_, _| Box::new(NullSink), events));
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        for _ in 0..40 {
+            if TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
+                server.abort();
+                return;
+            }
+            if server.is_finished() {
+                panic!("AirPlay receiver stopped before accepting IPv4");
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        server.abort();
+        panic!("AirPlay receiver did not accept an IPv4 connection");
     }
 }
