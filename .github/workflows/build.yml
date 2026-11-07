@@ -130,6 +130,10 @@ jobs:
           if (-not (Test-Path -LiteralPath $usbip -PathType Leaf)) { throw "USBip executable is missing: $usbip" }
           $task = Get-ScheduledTask -TaskName 'Win AirPlay USBIP'
           if ($task.Actions.Arguments -notmatch '-WindowStyle Hidden') { throw 'Controller task is not hidden' }
+          if ($task.Settings.DisallowStartIfOnBatteries -or $task.Settings.StopIfGoingOnBatteries) { throw 'Controller task stops on battery power' }
+          if ($task.Settings.ExecutionTimeLimit -ne 'PT0S') { throw 'Controller task has a time limit' }
+          if ($task.Settings.MultipleInstances -ne 'IgnoreNew') { throw 'Controller task can launch duplicate instances' }
+          if (-not @($task.Triggers | Where-Object { $_.Repetition.Interval -eq 'PT1M' -and -not $_.Repetition.Duration }).Count) { throw 'Controller task has no indefinite recovery trigger' }
           foreach ($protocol in @('TCP', 'UDP')) {
             $rule = Get-NetFirewallRule -DisplayName "Win AirPlay Receiver $protocol" -ErrorAction Stop
             $addresses = @(($rule | Get-NetFirewallAddressFilter).RemoteAddress)
@@ -155,6 +159,19 @@ jobs:
           } finally {
             Stop-Process -Id $probe.Id -Force -ErrorAction SilentlyContinue
           }
+          $before = (Get-ScheduledTaskInfo -TaskName 'Win AirPlay USBIP').LastRunTime
+          Stop-ScheduledTask -TaskName 'Win AirPlay USBIP' -ErrorAction Stop
+          $recovered = $false
+          for ($attempt = 0; $attempt -lt 100; $attempt++) {
+            Start-Sleep -Seconds 1
+            $task = Get-ScheduledTask -TaskName 'Win AirPlay USBIP'
+            $lastRun = (Get-ScheduledTaskInfo -TaskName 'Win AirPlay USBIP').LastRunTime
+            if ($task.State -eq 'Running' -and $lastRun -gt $before) {
+              $recovered = $true
+              break
+            }
+          }
+          if (-not $recovered) { throw 'Controller task did not recover after its launcher was stopped' }
           Write-Host "Bundled installer found USBip at $usbip"
       - uses: actions/upload-artifact@v4
         with:
@@ -192,6 +209,10 @@ jobs:
           if (-not (Test-Path -LiteralPath $usbip -PathType Leaf)) { throw "USBip executable is missing: $usbip" }
           $task = Get-ScheduledTask -TaskName 'Win AirPlay USBIP'
           if ($task.Actions.Arguments -notmatch '-WindowStyle Hidden') { throw 'Controller task is not hidden' }
+          if ($task.Settings.DisallowStartIfOnBatteries -or $task.Settings.StopIfGoingOnBatteries) { throw 'Controller task stops on battery power' }
+          if ($task.Settings.ExecutionTimeLimit -ne 'PT0S') { throw 'Controller task has a time limit' }
+          if ($task.Settings.MultipleInstances -ne 'IgnoreNew') { throw 'Controller task can launch duplicate instances' }
+          if (-not @($task.Triggers | Where-Object { $_.Repetition.Interval -eq 'PT1M' -and -not $_.Repetition.Duration }).Count) { throw 'Controller task has no indefinite recovery trigger' }
           foreach ($protocol in @('TCP', 'UDP')) {
             $rule = Get-NetFirewallRule -DisplayName "Win AirPlay Receiver $protocol" -ErrorAction Stop
             $addresses = @(($rule | Get-NetFirewallAddressFilter).RemoteAddress)
