@@ -419,6 +419,10 @@ fn speaker_outputs(speakers: Vec<Speaker>) -> Vec<SpeakerOutput> {
             let mut speaker = leader;
             speaker.name = speaker.group_name.clone().unwrap();
             speaker.device_id = Some(format!("stereo:{id}"));
+            speaker.low_latency_audio &= follower.low_latency_audio;
+            speaker
+                .codecs
+                .retain(|codec| follower.codecs.contains(codec));
             outputs.push(SpeakerOutput {
                 speaker,
                 follower: Some(follower),
