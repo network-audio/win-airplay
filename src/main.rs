@@ -395,25 +395,14 @@ fn speaker_outputs(speakers: Vec<Speaker>) -> Vec<SpeakerOutput> {
         });
         if members.len() == 2 && same_name {
             // A directly targeted follower can temporarily advertise igl=1.
-            // The public group name identifies the original leader when it
-            // matches exactly; otherwise use igl only when unambiguous.
+            // Select the same physical member throughout that change.
             let matching_name = members
                 .iter()
                 .position(|member| member.group_name.as_ref() == Some(&member.name));
-            let leaders = members.iter().filter(|member| member.group_leader).count();
-            let leader_index = matching_name
-                .or_else(|| {
-                    (leaders == 1).then(|| {
-                        members
-                            .iter()
-                            .position(|member| member.group_leader)
-                            .unwrap()
-                    })
-                })
-                .unwrap_or_else(|| {
-                    members.sort_by(|a, b| a.device_id.cmp(&b.device_id));
-                    0
-                });
+            let leader_index = matching_name.unwrap_or_else(|| {
+                members.sort_by(|a, b| a.device_id.cmp(&b.device_id));
+                0
+            });
             let leader = members.remove(leader_index);
             let follower = members.remove(0);
             let mut speaker = leader;
@@ -1564,6 +1553,17 @@ mod tests {
         let active = speaker_outputs(vec![outputs[0].speaker.clone(), active_follower]);
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].speaker.address, outputs[0].speaker.address);
+
+        let mut first = outputs[0].speaker.clone();
+        let mut second = outputs[0].follower.clone().unwrap();
+        first.name = "Unit A".into();
+        second.name = "Unit B".into();
+        first.group_name = Some("Pair".into());
+        second.group_name = Some("Pair".into());
+        let before = speaker_outputs(vec![first.clone(), second.clone()]);
+        second.group_leader = true;
+        let during = speaker_outputs(vec![first, second]);
+        assert_eq!(before[0].speaker.address, during[0].speaker.address);
     }
 
     #[test]
