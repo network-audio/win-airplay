@@ -388,17 +388,32 @@ fn speaker_outputs(speakers: Vec<Speaker>) -> Vec<SpeakerOutput> {
         });
     }
     for (id, mut members) in pairs {
-        let leaders = members.iter().filter(|member| member.group_leader).count();
         let same_name = members[0].group_name.as_ref().is_some_and(|name| {
             members
                 .iter()
                 .all(|member| member.group_name.as_ref() == Some(name))
         });
-        if members.len() == 2 && leaders == 1 && same_name {
-            let leader_index = members
+        if members.len() == 2 && same_name {
+            // A directly targeted follower can temporarily advertise igl=1.
+            // The public group name identifies the original leader when it
+            // matches exactly; otherwise use igl only when unambiguous.
+            let matching_name = members
                 .iter()
-                .position(|member| member.group_leader)
-                .unwrap();
+                .position(|member| member.group_name.as_ref() == Some(&member.name));
+            let leaders = members.iter().filter(|member| member.group_leader).count();
+            let leader_index = matching_name
+                .or_else(|| {
+                    (leaders == 1).then(|| {
+                        members
+                            .iter()
+                            .position(|member| member.group_leader)
+                            .unwrap()
+                    })
+                })
+                .unwrap_or_else(|| {
+                    members.sort_by(|a, b| a.device_id.cmp(&b.device_id));
+                    0
+                });
             let leader = members.remove(leader_index);
             let follower = members.remove(0);
             let mut speaker = leader;
@@ -1540,6 +1555,11 @@ mod tests {
             speaker_key(&speaker_outputs(vec![leader, follower])[0].speaker),
             key
         );
+        let mut active_follower = outputs[0].follower.clone().unwrap();
+        active_follower.group_leader = true;
+        let active = speaker_outputs(vec![outputs[0].speaker.clone(), active_follower]);
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].speaker.address, outputs[0].speaker.address);
     }
 
     #[test]
