@@ -92,7 +92,7 @@ impl GroupPcmPackets {
 
     fn push(&self, bytes: &[u8]) {
         let mut history = self.history.lock().unwrap();
-        for sample in bytes.chunks_exact(2) {
+        for sample in bytes.as_chunks::<2>().0 {
             history
                 .staging
                 .push_back(i16::from_le_bytes([sample[0], sample[1]]));
