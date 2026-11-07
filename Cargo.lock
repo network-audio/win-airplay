@@ -1568,7 +1568,7 @@ dependencies = [
 [[package]]
 name = "usbip-audio"
 version = "0.1.0"
-source = "git+https://github.com/stakach/usbip-audio?rev=bd68b8d738723d0e1d4eb719a9fac44699dd1eca#bd68b8d738723d0e1d4eb719a9fac44699dd1eca"
+source = "git+https://github.com/network-audio/usbip-audio?rev=9df5f91e0622dbe894b28a425e39364bbe5ee1ad#9df5f91e0622dbe894b28a425e39364bbe5ee1ad"
 dependencies = [
  "windows-sys 0.59.0",
 ]

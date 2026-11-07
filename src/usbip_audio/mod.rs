@@ -1,5 +1,5 @@
-//! One virtual USB Audio 1.0 speaker per receiver, served over USB/IP by the shared
-//! [usbip-audio](https://github.com/stakach/usbip-audio) crate.
+//! One virtual USB Audio 1.0 speaker per receiver, and the AirPlay receiver's USB Audio 2.0 microphone, served
+//! over USB/IP by the shared [usbip-audio](https://github.com/network-audio/usbip-audio) crate.
 
 use std::collections::VecDeque;
 use std::io;
@@ -12,11 +12,20 @@ use usbip_audio::MonotonicClock;
 
 pub use usbip_audio::uac1::Volume;
 
+mod input;
+pub use input::CaptureInput;
+
 const MAX_QUEUED_PCM_PACKETS: usize = 24;
 const ACTIVITY_SAMPLE_THRESHOLD: i16 = 64;
 /// Prototype id; production requires an assigned VID/PID
 const VENDOR_ID: u16 = 0xcafe;
 const PRODUCT_ID: u16 = 0x4001;
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub struct InputStreams {
+    pub busid: String,
+    pub input: Arc<CaptureInput>,
+}
 
 #[cfg_attr(not(windows), allow(dead_code))]
 pub struct DeviceStreams {
@@ -102,6 +111,10 @@ pub struct Server {
     inner: usbip_audio::Server,
 }
 
+fn busid(key: &str) -> String {
+    format!("1-{}", &key[..key.len().min(16)])
+}
+
 impl Server {
     /// Listens on `port` of the loopback interface, 0 for any free port, so that other applications using
     /// the usbip-win2 driver can run their own servers alongside.
@@ -115,7 +128,7 @@ impl Server {
     }
 
     pub fn add(&self, key: &str, name: &str, delay_ms: u8) -> DeviceStreams {
-        let busid = format!("1-{}", &key[..key.len().min(16)]);
+        let busid = busid(key);
         let pcm = Arc::new(PcmQueue::default());
         let (volume_events, volume) = mpsc::sync_channel(16);
         let config = Uac1SpeakerConfig {
@@ -133,6 +146,14 @@ impl Server {
         self.inner
             .add(&busid, Arc::new(Uac1Speaker::new(config, streams)));
         DeviceStreams { busid, pcm, volume }
+    }
+
+    /// The AirPlay receiver's microphone, unplugged until [`CaptureInput::set_connected`].
+    pub fn add_input(&self, key: &str, name: &str) -> InputStreams {
+        let busid = busid(key);
+        let input = Arc::new(CaptureInput::new(name, key));
+        self.inner.add(&busid, input.device());
+        InputStreams { busid, input }
     }
 
     pub fn remove(&self, busid: &str) {
@@ -339,6 +360,50 @@ mod tests {
             streams.pcm.pop_timeout(Duration::from_secs(2)).unwrap(),
             pcm
         );
+    }
+
+    #[test]
+    fn the_input_is_unplugged_until_an_airplay_sender_connects() {
+        let server = Server::start(0).unwrap();
+        let streams = server.add_input("capture-test", "Test Input");
+        assert_eq!(streams.busid, "1-capture-test");
+        let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, server.port())).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = vec![1, 0x11, 0x80, 3, 0, 0, 0, 0];
+        fixed(&mut request, &streams.busid, 32);
+        client.write_all(&request).unwrap();
+        let mut import = [0; 320];
+        client.read_exact(&mut import).unwrap();
+        assert_eq!(&import[..8], &[1, 0x11, 0, 3, 0, 0, 0, 0]);
+        let mut reply = [0; 48];
+
+        // GET_CUR of the microphone terminal's connector
+        let mut connector = |client: &mut TcpStream, seq| {
+            let setup = [0xa1, 1, 0, 2, 0, 4, 6, 0];
+            client
+                .write_all(&submit(seq, 1, 0, setup, &[], u32::MAX, &[]))
+                .unwrap();
+            client.read_exact(&mut reply).unwrap();
+            assert_eq!(be32(&reply[20..24]), 0);
+            let mut data = vec![0; be32(&reply[24..28]) as usize];
+            client.read_exact(&mut data).unwrap();
+            data
+        };
+        assert_eq!(connector(&mut client, 1), [0; 6]);
+
+        // the pending interrupt transfer reports the change
+        let interrupt = submit(2, 1, 3, [0, 0, 0, 0, 0, 0, 8, 0], &[], 0, &[]);
+        client.write_all(&interrupt).unwrap();
+        streams.input.set_connected(true);
+        let mut reply = [0; 48];
+        client.read_exact(&mut reply).unwrap();
+        assert_eq!((be32(&reply[4..8]), be32(&reply[24..28])), (2, 6));
+        let mut event = [0; 6];
+        client.read_exact(&mut event).unwrap();
+        assert_eq!(event, [0, 1, 0, 2, 0, 4]);
+        assert_eq!(connector(&mut client, 3), [2, 3, 0, 0, 0, 0]);
     }
 
     fn submit(

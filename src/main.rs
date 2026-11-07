@@ -16,7 +16,6 @@ mod airplay;
 #[cfg(windows)]
 mod airplay_input;
 mod usbip_audio;
-mod usbip_input;
 #[cfg(windows)]
 mod windows_audio;
 #[cfg(windows)]
@@ -483,7 +482,7 @@ fn run(cli: Cli) -> Result<(), String> {
             }
         }
         Action::UsbipInputProbe => {
-            let server = usbip_input::Server::start(3240).map_err(|error| error.to_string())?;
+            let server = usbip_audio::Server::start(3240).map_err(|error| error.to_string())?;
             let streams = server.add_input("capture-probe", "Win AirPlay Input Probe");
             let signal = std::env::temp_dir().join("win-airplay-input-probe-connect");
             let _ = std::fs::remove_file(&signal);
@@ -882,9 +881,7 @@ fn run_usbip_manager() -> Result<(), String> {
     let server =
         // any free port: other applications may run USB/IP servers for the same driver
         usbip_audio::Server::start(0).map_err(|error| format!("USB/IP server: {error}"))?;
-    let input_server =
-        usbip_input::Server::start(0).map_err(|error| format!("USB/IP input server: {error}"))?;
-    let input_streams = input_server.add_input("airplay-capture", "Win AirPlay Input");
+    let input_streams = server.add_input("airplay-capture", "Win AirPlay Input");
     let receiver_device_id = airplay_input::start(input_streams.input.clone())?;
     let mut input_port = None;
     let mut last_input_attach = Instant::now() - Duration::from_secs(5);
@@ -1052,7 +1049,7 @@ fn run_usbip_manager() -> Result<(), String> {
     loop {
         if input_port.is_none() && last_input_attach.elapsed() >= Duration::from_secs(5) {
             last_input_attach = Instant::now();
-            match usbip_attach(input_server.port(), &input_streams.busid) {
+            match usbip_attach(server.port(), &input_streams.busid) {
                 Ok(port) => {
                     println!("USB input Win AirPlay Input on port {port}");
                     input_port = Some(port);

@@ -1,6 +1,6 @@
 //! AirPlay 2 receiver feeding the virtual USB capture endpoint.
 
-use crate::usbip_input::CaptureInput;
+use crate::usbip_audio::CaptureInput;
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use openairplay2::{AudioSink, Event, Identity, Receiver};
