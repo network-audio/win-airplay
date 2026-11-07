@@ -2,13 +2,15 @@ use crate::{AudioEncoding, StreamProfile};
 use capture::sources::sine::SineSource;
 use capture::AudioSource;
 use pipeline::{PipelineMetricsTracker, DEFAULT_RING_BUFFER_PACKETS};
-use raop::ap2::session::{Ap2AudioCodec, Ap2Config, Ap2Session};
+use raop::ap2::session::{Ap2AudioCodec, Ap2Config, Ap2Session, GroupTiming};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::RwLock;
+use std::sync::Weak;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -51,6 +53,138 @@ struct BalancedSource {
 struct UsbPcmSource {
     queue: Arc<crate::usbip_audio::PcmQueue>,
     pending: VecDeque<f32>,
+}
+
+struct PacketHistory {
+    packets: VecDeque<(u64, [i16; 704])>,
+    staging: VecDeque<i16>,
+    next_sequence: u64,
+    first_sequence: Option<u64>,
+}
+
+/// One packetizer and one frame-indexed history for both sides of a stereo pair.
+/// Each AirPlay sender reads by packet index, so thread scheduling cannot shift
+/// a channel by one packet relative to the other.
+pub struct GroupPcmPackets {
+    history: Mutex<PacketHistory>,
+}
+
+impl GroupPcmPackets {
+    pub fn start(queue: Arc<crate::usbip_audio::PcmQueue>) -> Arc<Self> {
+        let packets = Arc::new(Self {
+            history: Mutex::new(PacketHistory {
+                packets: VecDeque::with_capacity(128),
+                staging: VecDeque::with_capacity(1408),
+                next_sequence: 0,
+                first_sequence: None,
+            }),
+        });
+        let weak: Weak<Self> = Arc::downgrade(&packets);
+        thread::spawn(move || {
+            while let Some(packets) = weak.upgrade() {
+                if let Some(bytes) = queue.pop_timeout(Duration::from_millis(20)) {
+                    packets.push(&bytes);
+                }
+            }
+        });
+        packets
+    }
+
+    fn push(&self, bytes: &[u8]) {
+        let mut history = self.history.lock().unwrap();
+        for sample in bytes.chunks_exact(2) {
+            history
+                .staging
+                .push_back(i16::from_le_bytes([sample[0], sample[1]]));
+        }
+        while history.staging.len() >= 704 {
+            let mut packet = [0i16; 704];
+            for sample in &mut packet {
+                *sample = history.staging.pop_front().unwrap();
+            }
+            let sequence = history.next_sequence;
+            history.next_sequence += 1;
+            if history.packets.len() == 128 {
+                history.packets.pop_front();
+            }
+            history.packets.push_back((sequence, packet));
+        }
+    }
+
+    fn read_channel(&self, index: u64, channel: usize, gain: f32, output: &mut [i16; 704]) -> bool {
+        let mut history = self.history.lock().unwrap();
+        let candidate = history.next_sequence.saturating_sub(12);
+        let base = *history.first_sequence.get_or_insert(candidate);
+        let requested = base + index;
+        if let Some((_, packet)) = history
+            .packets
+            .iter()
+            .find(|(sequence, _)| *sequence == requested)
+        {
+            for frame in 0..352 {
+                let sample = (packet[frame * 2 + channel] as f32 * gain)
+                    .round()
+                    .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+                output[frame * 2] = sample;
+                output[frame * 2 + 1] = sample;
+            }
+            true
+        } else {
+            output.fill(0);
+            false
+        }
+    }
+}
+
+enum SessionInput {
+    Source(Box<dyn AudioSource + Send>),
+    Group(
+        Arc<GroupPcmPackets>,
+        Arc<RwLock<Vec<f32>>>,
+        Arc<GroupTiming>,
+        usize,
+    ),
+}
+
+pub struct GroupPlayback {
+    pub packets: Arc<GroupPcmPackets>,
+    pub timing: Arc<GroupTiming>,
+    pub channel: usize,
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::*;
+
+    #[test]
+    fn both_channels_read_the_same_packet_index() {
+        let packets = GroupPcmPackets {
+            history: Mutex::new(PacketHistory {
+                packets: VecDeque::new(),
+                staging: VecDeque::new(),
+                next_sequence: 0,
+                first_sequence: None,
+            }),
+        };
+        let mut usb = Vec::new();
+        for index in 0..13i16 {
+            for _ in 0..352 {
+                usb.extend_from_slice(&(100 + index).to_le_bytes());
+                usb.extend_from_slice(&(200 + index).to_le_bytes());
+            }
+        }
+        packets.push(&usb);
+        let mut left = [0; 704];
+        let mut right = [0; 704];
+        packets.read_channel(0, 0, 1.0, &mut left);
+        packets.read_channel(0, 1, 1.0, &mut right);
+        assert_eq!(left[0], 101);
+        assert_eq!(left[1], 101);
+        assert_eq!(right[0], 201);
+        assert_eq!(right[1], 201);
+        packets.read_channel(1, 0, 0.5, &mut left);
+        assert_eq!(left[0], 51);
+    }
 }
 
 impl AudioSource for UsbPcmSource {
@@ -176,7 +310,7 @@ impl StreamHandle {
             };
             if let Err(error) = runtime.block_on(run_session(
                 target,
-                Box::new(balanced),
+                SessionInput::Source(Box::new(balanced)),
                 profile,
                 initial_volume,
                 receiver,
@@ -184,6 +318,52 @@ impl StreamHandle {
                 None,
             )) {
                 eprintln!("AirPlay USB stream to {target} ended: {error}");
+            }
+        });
+        Self {
+            control,
+            worker,
+            channel_gains,
+        }
+    }
+
+    pub fn start_group_usbip(
+        target: SocketAddr,
+        playback: GroupPlayback,
+        profile: StreamProfile,
+        initial_volume: Volume,
+        initial_channel_gains: Vec<f32>,
+        remote_volume: Option<Sender<f32>>,
+    ) -> Self {
+        let (control, receiver) = mpsc::unbounded_channel();
+        let channel_gains = Arc::new(RwLock::new(initial_channel_gains));
+        let worker_gains = channel_gains.clone();
+        let worker = thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    eprintln!("AirPlay runtime failed: {error}");
+                    return;
+                }
+            };
+            if let Err(error) = runtime.block_on(run_session(
+                target,
+                SessionInput::Group(
+                    playback.packets,
+                    worker_gains,
+                    playback.timing,
+                    playback.channel,
+                ),
+                profile,
+                initial_volume,
+                receiver,
+                remote_volume,
+                None,
+            )) {
+                eprintln!("AirPlay stereo stream to {target} ended: {error}");
             }
         });
         Self {
@@ -230,7 +410,7 @@ impl StreamHandle {
                 };
                 run_session(
                     target,
-                    Box::new(balanced),
+                    SessionInput::Source(Box::new(balanced)),
                     profile,
                     initial_volume,
                     receiver,
@@ -284,7 +464,7 @@ pub fn test_tone(target: SocketAddr, duration: Duration) -> Result<(), String> {
         let (_control, receiver) = mpsc::unbounded_channel();
         run_session(
             target,
-            Box::new(source),
+            SessionInput::Source(Box::new(source)),
             StreamProfile::default(),
             Volume {
                 scalar: 0.35,
@@ -300,13 +480,17 @@ pub fn test_tone(target: SocketAddr, duration: Duration) -> Result<(), String> {
 
 async fn run_session(
     target: SocketAddr,
-    source: Box<dyn AudioSource + Send>,
+    input: SessionInput,
     profile: StreamProfile,
     volume: Volume,
     mut control: mpsc::UnboundedReceiver<Control>,
     remote_volume: Option<Sender<f32>>,
     duration: Option<Duration>,
 ) -> Result<(), String> {
+    let group_timing = match &input {
+        SessionInput::Source(_) => None,
+        SessionInput::Group(_, _, timing, _) => Some(timing.clone()),
+    };
     let config = Ap2Config {
         target,
         latency_frames: profile.latency_frames,
@@ -320,13 +504,38 @@ async fn run_session(
         volume_db: volume.receiver_db(),
         quiet_mode: false,
         initial_progress: true,
+        group_timing,
         ..Default::default()
     };
     let metrics = Arc::new(PipelineMetricsTracker::new(DEFAULT_RING_BUFFER_PACKETS));
-    let mut session =
-        Ap2Session::start_with_source(config, source, metrics.clone(), DEFAULT_RING_BUFFER_PACKETS)
+    let mut session = match input {
+        SessionInput::Source(source) => {
+            Ap2Session::start_with_source(
+                config,
+                source,
+                metrics.clone(),
+                DEFAULT_RING_BUFFER_PACKETS,
+            )
             .await
-            .map_err(|error| error.to_string())?;
+        }
+        SessionInput::Group(packets, gains, _, channel) => {
+            let packet_metrics = metrics.clone();
+            Ap2Session::start_indexed(config, move |index, output| {
+                let gain = gains
+                    .read()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .get(channel)
+                    .copied()
+                    .unwrap_or(1.0);
+                if !packets.read_channel(index, channel, gain, output) {
+                    packet_metrics.record_discontinuity();
+                }
+                packet_metrics.record_packet_sent();
+            })
+            .await
+        }
+    }
+    .map_err(|error| error.to_string())?;
     let stats = session.stats();
     let startup_lead_ms = {
         let now = std::time::Instant::now();

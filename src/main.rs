@@ -102,6 +102,11 @@ struct Speaker {
     device_id: Option<String>,
     codecs: Vec<u8>,
     low_latency_audio: bool,
+    /// Stable identifier shared by the members of an AirPlay stereo pair.
+    stereo_pair_id: Option<String>,
+    stereo_mode: bool,
+    group_name: Option<String>,
+    group_leader: bool,
 }
 
 #[cfg(any(windows, test))]
@@ -303,6 +308,10 @@ fn discover(seconds: u64) -> Result<Vec<Speaker>, String> {
                         device_id: device_id.clone(),
                         codecs: codecs.clone(),
                         low_latency_audio: false,
+                        stereo_pair_id: info.get_property_val_str("tsid").map(str::to_owned),
+                        stereo_mode: info.get_property_val_str("tsm") == Some("3"),
+                        group_name: info.get_property_val_str("gpn").map(str::to_owned),
+                        group_leader: info.get_property_val_str("igl") == Some("1"),
                     };
                     found.insert((name.clone(), address, *service), speaker);
                 }
@@ -351,6 +360,62 @@ fn speaker_key(speaker: &Speaker) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone)]
+struct SpeakerOutput {
+    speaker: Speaker,
+    follower: Option<Speaker>,
+}
+
+/// Only a complete, unambiguous stereo pair becomes one Windows endpoint.
+/// Incomplete stereo pairs are withheld until both sides are reachable.
+#[cfg(any(windows, test))]
+fn speaker_outputs(speakers: Vec<Speaker>) -> Vec<SpeakerOutput> {
+    let mut pairs: BTreeMap<String, Vec<Speaker>> = BTreeMap::new();
+    let mut outputs = Vec::new();
+    for speaker in speakers {
+        if let Some(id) = &speaker.stereo_pair_id {
+            if speaker.stereo_mode && speaker.group_name.is_some() {
+                pairs.entry(id.clone()).or_default().push(speaker);
+                continue;
+            }
+        }
+        outputs.push(SpeakerOutput {
+            speaker,
+            follower: None,
+        });
+    }
+    for (id, mut members) in pairs {
+        let leaders = members.iter().filter(|member| member.group_leader).count();
+        let same_name = members[0].group_name.as_ref().is_some_and(|name| {
+            members
+                .iter()
+                .all(|member| member.group_name.as_ref() == Some(name))
+        });
+        if members.len() == 2 && leaders == 1 && same_name {
+            let leader_index = members
+                .iter()
+                .position(|member| member.group_leader)
+                .unwrap();
+            let leader = members.remove(leader_index);
+            let follower = members.remove(0);
+            let mut speaker = leader;
+            speaker.name = speaker.group_name.clone().unwrap();
+            speaker.device_id = Some(format!("stereo:{id}"));
+            outputs.push(SpeakerOutput {
+                speaker,
+                follower: Some(follower),
+            });
+        } else if members.len() > 2 || !same_name {
+            outputs.extend(members.into_iter().map(|speaker| SpeakerOutput {
+                speaker,
+                follower: None,
+            }));
+        }
+    }
+    outputs
 }
 
 #[cfg(windows)]
@@ -862,6 +927,8 @@ fn run_usbip_manager() -> Result<(), String> {
         endpoint: String,
         busid: String,
         target: SocketAddr,
+        follower: Option<SocketAddr>,
+        group_name: Option<String>,
         profile: StreamProfile,
         pcm: Arc<usbip_audio::PcmQueue>,
         volume_events: mpsc::Receiver<usbip_audio::Volume>,
@@ -869,7 +936,9 @@ fn run_usbip_manager() -> Result<(), String> {
         usb_muted: bool,
         channel_gains: [f32; 2],
         stream: Option<airplay::StreamHandle>,
+        follower_stream: Option<airplay::StreamHandle>,
         remote_volume: Option<mpsc::Receiver<f32>>,
+        follower_remote_volume: Option<mpsc::Receiver<f32>>,
         last_receiver_volume: Option<(f32, Instant)>,
         port: Option<u32>,
         last_attach: Instant,
@@ -943,6 +1012,12 @@ fn run_usbip_manager() -> Result<(), String> {
                                     address,
                                     info.get_port(),
                                 ),
+                                stereo_pair_id: info
+                                    .get_property_val_str("tsid")
+                                    .map(str::to_owned),
+                                stereo_mode: info.get_property_val_str("tsm") == Some("3"),
+                                group_name: info.get_property_val_str("gpn").map(str::to_owned),
+                                group_leader: info.get_property_val_str("igl") == Some("1"),
                             })
                             .collect();
                         known.insert(fullname, speakers);
@@ -1061,21 +1136,33 @@ fn run_usbip_manager() -> Result<(), String> {
             for managed in active.values_mut() {
                 managed.missed_scans = managed.missed_scans.saturating_add(1);
             }
-            for speaker in speakers {
+            for output in speaker_outputs(speakers) {
+                let speaker = output.speaker;
+                let follower = output.follower;
                 let key = speaker_key(&speaker);
                 let target = SocketAddr::new(speaker.address, speaker.port);
+                let follower_target = follower
+                    .as_ref()
+                    .map(|speaker| SocketAddr::new(speaker.address, speaker.port));
+                let group_name = follower_target.map(|_| speaker.name.clone());
                 let profile = speaker.stream_profile();
                 if let Some(managed) = active.get_mut(&key) {
                     managed.missed_scans = 0;
-                    if managed.target != target {
+                    if managed.target != target || managed.follower != follower_target {
                         if let Some(stream) = managed.stream.take() {
                             stream.stop();
                         }
+                        if let Some(stream) = managed.follower_stream.take() {
+                            stream.stop();
+                        }
                         managed.remote_volume = None;
+                        managed.follower_remote_volume = None;
                         managed.last_receiver_volume = None;
                         managed.target = target;
+                        managed.follower = follower_target;
                     }
                     managed.profile = profile;
+                    managed.group_name = group_name;
                     continue;
                 }
                 let endpoint = endpoint_name(&speaker);
@@ -1087,13 +1174,19 @@ fn run_usbip_manager() -> Result<(), String> {
                         None
                     }
                 };
-                println!("USB output {endpoint} for {target}");
+                if let Some(follower) = follower_target {
+                    println!("USB stereo output {endpoint} for {target} and {follower}");
+                } else {
+                    println!("USB output {endpoint} for {target}");
+                }
                 active.insert(
                     key,
                     Managed {
                         endpoint,
                         busid: streams.busid,
                         target,
+                        follower: follower_target,
+                        group_name,
                         profile,
                         pcm: streams.pcm,
                         volume_events: streams.volume,
@@ -1104,7 +1197,9 @@ fn run_usbip_manager() -> Result<(), String> {
                         usb_muted: false,
                         channel_gains: [1.0, 1.0],
                         stream: None,
+                        follower_stream: None,
                         remote_volume: None,
+                        follower_remote_volume: None,
                         last_receiver_volume: None,
                         port,
                         last_attach: Instant::now(),
@@ -1118,6 +1213,9 @@ fn run_usbip_manager() -> Result<(), String> {
                     return true;
                 }
                 if let Some(stream) = managed.stream.take() {
+                    stream.stop();
+                }
+                if let Some(stream) = managed.follower_stream.take() {
                     stream.stop();
                 }
                 if let Some(port) = managed.port {
@@ -1151,9 +1249,15 @@ fn run_usbip_manager() -> Result<(), String> {
                 if let Some(stream) = &managed.stream {
                     stream.set_channel_gains(volume.channels.to_vec());
                 }
+                if let Some(stream) = &managed.follower_stream {
+                    stream.set_channel_gains(volume.channels.to_vec());
+                }
             }
             if let Some(remote) = &managed.remote_volume {
                 while let Ok(scalar) = remote.try_recv() {
+                    if (managed.slider_volume.scalar - scalar).abs() < 0.005 {
+                        continue;
+                    }
                     eprintln!(
                         "AirPlay receiver volume event: {} volume={scalar:.3}",
                         managed.endpoint
@@ -1164,6 +1268,27 @@ fn run_usbip_manager() -> Result<(), String> {
                     } else {
                         managed.slider_volume.scalar = scalar;
                         managed.last_receiver_volume = Some((scalar, Instant::now()));
+                        if let Some(stream) = &managed.follower_stream {
+                            stream.set_volume(managed.slider_volume);
+                        }
+                    }
+                }
+            }
+            if let Some(remote) = &managed.follower_remote_volume {
+                while let Ok(scalar) = remote.try_recv() {
+                    if (managed.slider_volume.scalar - scalar).abs() < 0.005 {
+                        continue;
+                    }
+                    eprintln!(
+                        "AirPlay receiver volume event: {} follower volume={scalar:.3}",
+                        managed.endpoint
+                    );
+                    if windows_audio::set_render_volume(&managed.endpoint, scalar).is_ok() {
+                        managed.slider_volume.scalar = scalar;
+                        managed.last_receiver_volume = Some((scalar, Instant::now()));
+                        if let Some(stream) = &managed.stream {
+                            stream.set_volume(managed.slider_volume);
+                        }
                     }
                 }
             }
@@ -1192,6 +1317,9 @@ fn run_usbip_manager() -> Result<(), String> {
                             if let Some(stream) = &managed.stream {
                                 stream.set_volume(volume);
                             }
+                            if let Some(stream) = &managed.follower_stream {
+                                stream.set_volume(volume);
+                            }
                         }
                     }
                 }
@@ -1204,6 +1332,10 @@ fn run_usbip_manager() -> Result<(), String> {
                 .stream
                 .as_ref()
                 .is_some_and(|stream| stream.is_finished())
+                || managed
+                    .follower_stream
+                    .as_ref()
+                    .is_some_and(|stream| stream.is_finished())
                 || inactive
             {
                 if let Some(stream) = managed.stream.take() {
@@ -1213,7 +1345,11 @@ fn run_usbip_manager() -> Result<(), String> {
                         managed.endpoint
                     );
                 }
+                if let Some(stream) = managed.follower_stream.take() {
+                    stream.stop();
+                }
                 managed.remote_volume = None;
+                managed.follower_remote_volume = None;
                 managed.last_receiver_volume = None;
             }
             if managed.port.is_some()
@@ -1230,14 +1366,59 @@ fn run_usbip_manager() -> Result<(), String> {
                 }
                 let (remote_tx, remote_rx) = mpsc::channel();
                 println!("Starting AirPlay stream for {}", managed.endpoint);
-                managed.stream = Some(airplay::StreamHandle::start_usbip(
-                    managed.target,
-                    managed.pcm.clone(),
-                    managed.profile,
-                    managed.slider_volume,
-                    managed.channel_gains.to_vec(),
-                    Some(remote_tx),
-                ));
+                if let Some(follower) = managed.follower {
+                    let packets = airplay::GroupPcmPackets::start(managed.pcm.clone());
+                    let timing = Arc::new(raop::ap2::session::GroupTiming::new(2));
+                    let swapped =
+                        std::env::var("WIN_AIRPLAY_STEREO_SWAP")
+                            .ok()
+                            .is_some_and(|value| {
+                                value.split(',').any(|name| {
+                                    name.trim() == "*"
+                                        || managed.group_name.as_deref().is_some_and(|group| {
+                                            name.trim().eq_ignore_ascii_case(group)
+                                        })
+                                })
+                            });
+                    if swapped {
+                        eprintln!("AirPlay stereo channels swapped for {}", managed.endpoint);
+                    }
+                    let (follower_tx, follower_rx) = mpsc::channel();
+                    managed.stream = Some(airplay::StreamHandle::start_group_usbip(
+                        managed.target,
+                        airplay::GroupPlayback {
+                            packets: packets.clone(),
+                            timing: timing.clone(),
+                            channel: usize::from(swapped),
+                        },
+                        managed.profile,
+                        managed.slider_volume,
+                        managed.channel_gains.to_vec(),
+                        Some(remote_tx),
+                    ));
+                    managed.follower_stream = Some(airplay::StreamHandle::start_group_usbip(
+                        follower,
+                        airplay::GroupPlayback {
+                            packets,
+                            timing,
+                            channel: usize::from(!swapped),
+                        },
+                        managed.profile,
+                        managed.slider_volume,
+                        managed.channel_gains.to_vec(),
+                        Some(follower_tx),
+                    ));
+                    managed.follower_remote_volume = Some(follower_rx);
+                } else {
+                    managed.stream = Some(airplay::StreamHandle::start_usbip(
+                        managed.target,
+                        managed.pcm.clone(),
+                        managed.profile,
+                        managed.slider_volume,
+                        managed.channel_gains.to_vec(),
+                        Some(remote_tx),
+                    ));
+                }
                 managed.remote_volume = Some(remote_rx);
                 managed.last_receiver_volume = None;
                 managed.last_spawn = Instant::now();
@@ -1312,12 +1493,53 @@ mod tests {
             device_id: Some("AA:BB:CC:DD:EE:FF".into()),
             codecs: vec![0, 1],
             low_latency_audio: false,
+            stereo_pair_id: None,
+            stereo_mode: false,
+            group_name: None,
+            group_leader: false,
         };
         let key = speaker_key(&speaker);
         speaker.address = "192.0.2.2".parse().unwrap();
         speaker.device_id = Some("aa:bb:cc:dd:ee:ff".into());
         assert_eq!(speaker_key(&speaker), key);
         assert_eq!(key.len(), 32);
+    }
+
+    #[test]
+    fn stereo_pair_is_one_output_only_when_both_members_are_present() {
+        let mut leader = Speaker {
+            name: "Bedroom".into(),
+            address: "192.0.2.32".parse().unwrap(),
+            port: 7000,
+            service: SERVICE_TYPES[0].into(),
+            model: None,
+            device_id: Some("11:22:33:44:55:66".into()),
+            codecs: vec![0, 1],
+            low_latency_audio: true,
+            stereo_pair_id: Some("pair-uuid".into()),
+            stereo_mode: true,
+            group_name: Some("Bedroom".into()),
+            group_leader: true,
+        };
+        let mut follower = leader.clone();
+        follower.name = "Bedroom (2)".into();
+        follower.address = "192.0.2.33".parse().unwrap();
+        follower.device_id = Some("77:88:99:AA:BB:CC".into());
+        follower.group_leader = false;
+        assert!(speaker_outputs(vec![leader.clone()]).is_empty());
+        let outputs = speaker_outputs(vec![follower.clone(), leader.clone()]);
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].speaker.name, "Bedroom");
+        assert_eq!(
+            outputs[0].follower.as_ref().unwrap().address,
+            follower.address
+        );
+        let key = speaker_key(&outputs[0].speaker);
+        leader.address = "192.0.2.99".parse().unwrap();
+        assert_eq!(
+            speaker_key(&speaker_outputs(vec![leader, follower])[0].speaker),
+            key
+        );
     }
 
     #[test]
@@ -1332,6 +1554,10 @@ mod tests {
             device_id: Some("aa:bb:cc:dd:ee:ff".into()),
             codecs: vec![],
             low_latency_audio: false,
+            stereo_pair_id: None,
+            stereo_mode: false,
+            group_name: None,
+            group_leader: false,
         };
         assert!(is_own_airplay_input(&speaker, "AA:BB:CC:DD:EE:FF", &[]));
         speaker.device_id = None;
@@ -1354,6 +1580,10 @@ mod tests {
             device_id: None,
             codecs: parse_codecs(Some("0,1,2,3")),
             low_latency_audio: true,
+            stereo_pair_id: None,
+            stereo_mode: false,
+            group_name: None,
+            group_leader: false,
         };
         assert_eq!(
             speaker.stream_profile().encoding,
