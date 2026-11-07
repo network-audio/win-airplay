@@ -18,8 +18,8 @@ Name "Win AirPlay USB/IP"
 OutFile "${OUT_FILE}"
 InstallDir "$PROGRAMFILES64\Win AirPlay USBIP"
 RequestExecutionLevel admin
-VIProductVersion "1.2.3.0"
-VIAddVersionKey "ProductVersion" "1.2.3"
+VIProductVersion "1.2.4.0"
+VIAddVersionKey "ProductVersion" "1.2.4"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
@@ -70,7 +70,7 @@ Section "Win AirPlay USB/IP" Main
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\WinAirPlayUSBIP" "DisplayName" "Win AirPlay USB/IP"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\WinAirPlayUSBIP" "DisplayVersion" "1.2.3"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\WinAirPlayUSBIP" "DisplayVersion" "1.2.4"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\WinAirPlayUSBIP" "UninstallString" '"$INSTDIR\Uninstall.exe"'
 SectionEnd
 

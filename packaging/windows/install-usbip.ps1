@@ -56,8 +56,14 @@ foreach ($protocol in @('TCP', 'UDP')) {
 $launcher = Join-Path $folder 'run-usbip.ps1'
 $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $taskAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`""
-$taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+$taskTriggers = @(
+    New-ScheduledTaskTrigger -AtLogOn -User $user
+    # If sleep, a power change, or an external termination stops the launcher,
+    # retry it without requiring another sign-in. IgnoreNew keeps one copy.
+    New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
+)
 $taskPrincipal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
+$taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
 Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $taskTrigger -Principal $taskPrincipal -Force | Out-Null
+Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $taskTriggers -Principal $taskPrincipal -Settings $taskSettings -Force | Out-Null
 Start-ScheduledTask -TaskName $taskName
